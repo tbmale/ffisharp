@@ -73,6 +73,18 @@ namespace FfiSharp.Interop
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void ClosureFree(IntPtr writable);
 
+        // Reusable call plans (libffi 3.7.0+). Optional fast path; may be null when
+        // the loaded libffi predates the API. Detect via HasCallPlanApi and fall
+        // back to ffi_call.
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate IntPtr CallPlanAllocFn(IntPtr cif);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void CallPlanInvokeFn(IntPtr plan, IntPtr fn, IntPtr rvalue, IntPtr avalues);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void CallPlanFreeFn(IntPtr plan);
+
         private readonly INativeLibrary _lib;
         private readonly PrepCif _prepCif;
         private readonly Call _call;
@@ -82,12 +94,18 @@ namespace FfiSharp.Interop
         private readonly ClosureAllocFn _closureAlloc;
         private readonly PrepClosureLoc _prepClosureLoc;
         private readonly ClosureFree _closureFree;
+        private readonly CallPlanAllocFn _callPlanAlloc;
+        private readonly CallPlanInvokeFn _callPlanInvoke;
+        private readonly CallPlanFreeFn _callPlanFree;
         private readonly Dictionary<FfiPrimitive, FfiTypeRef> _primitiveTypes = new Dictionary<FfiPrimitive, FfiTypeRef>();
         private readonly FfiTypeRef _pointerType;
 
         public int DefaultAbi => _getDefaultAbi();
         public ulong VersionNumber => _getVersionNumber().ToUInt64();
         public int ClosureSize => (int)_getClosureSize().ToUInt64();
+
+        /// <summary>Whether the loaded libffi exposes reusable call plans (3.7.0+).</summary>
+        public bool HasCallPlanApi => _callPlanAlloc != null;
 
         public LibFfiNative(INativeLibrary lib)
         {
@@ -100,6 +118,11 @@ namespace FfiSharp.Interop
             _closureAlloc = Resolve<ClosureAllocFn>("ffi_closure_alloc");
             _prepClosureLoc = Resolve<PrepClosureLoc>("ffi_prep_closure_loc");
             _closureFree = Resolve<ClosureFree>("ffi_closure_free");
+
+            // Optional fast path (libffi >= 3.7.0). Missing symbols -> null -> fallback.
+            _callPlanAlloc = TryResolve<CallPlanAllocFn>("ffi_call_plan_alloc");
+            _callPlanInvoke = TryResolve<CallPlanInvokeFn>("ffi_call_plan_invoke");
+            _callPlanFree = TryResolve<CallPlanFreeFn>("ffi_call_plan_free");
 
             // Resolve the fixed-width primitive ffi_type_* globals. Char/Long/ULong
             // are platform-dependent and map to one of these via FfiPlatform; they
@@ -126,6 +149,12 @@ namespace FfiSharp.Interop
             if (p == IntPtr.Zero)
                 throw new MissingSymbolException(name + " (in libffi)");
             return Marshal.GetDelegateForFunctionPointer<T>(p);
+        }
+
+        private T TryResolve<T>(string name) where T : class
+        {
+            IntPtr p = _lib.GetSymbol(name);
+            return p == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(p);
         }
 
         /// <summary>Resolves a fixed-width primitive's libffi type (no Char/Long/ULong).</summary>
@@ -222,6 +251,21 @@ namespace FfiSharp.Interop
         }
 
         public void FreeClosure(IntPtr writable) => _closureFree(writable);
+
+        /// <summary>Builds a reusable call plan for a prepared cif (3.7.0+). Returns IntPtr.Zero on OOM.</summary>
+        public IntPtr CreateCallPlan(IntPtr cif)
+            => _callPlanAlloc != null ? _callPlanAlloc(cif) : IntPtr.Zero;
+
+        /// <summary>Invokes a function through a reusable call plan (identical semantics to ffi_call).</summary>
+        public void InvokeCallPlan(IntPtr plan, IntPtr fn, IntPtr rvalue, IntPtr avalues)
+            => _callPlanInvoke(plan, fn, rvalue, avalues);
+
+        /// <summary>Frees a reusable call plan. Passing IntPtr.Zero is harmless.</summary>
+        public void FreeCallPlan(IntPtr plan)
+        {
+            if (plan != IntPtr.Zero && _callPlanFree != null)
+                _callPlanFree(plan);
+        }
 
         private static string PrimitiveSymbol(FfiPrimitive p)
         {

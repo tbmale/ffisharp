@@ -14,6 +14,8 @@ namespace FfiSharp.Bindings
     {
         private IntPtr _cif;
         private IntPtr _argTypesArray;
+        private IntPtr _fastPlan;
+        private Action<IntPtr> _fastPlanFree;
         private bool _disposed;
 
         internal FfiCallPlan(IntPtr cif, IntPtr argTypesArray, FfiType returnType, IReadOnlyList<FfiType> argumentTypes)
@@ -27,6 +29,16 @@ namespace FfiSharp.Bindings
         internal IntPtr Cif => _cif;
         internal IntPtr ArgTypesArray => _argTypesArray;
 
+        /// <summary>The reusable libffi call plan, or <see cref="IntPtr.Zero"/> if unavailable.</summary>
+        internal IntPtr FastPlan => _fastPlan;
+        internal bool HasFastPlan => _fastPlan != IntPtr.Zero;
+
+        internal void AttachFastPlan(IntPtr fastPlan, Action<IntPtr> free)
+        {
+            _fastPlan = fastPlan;
+            _fastPlanFree = free;
+        }
+
         public IReadOnlyList<FfiType> ArgumentTypes { get; }
         public FfiType ReturnType { get; }
 
@@ -34,6 +46,11 @@ namespace FfiSharp.Bindings
         {
             if (_disposed) return;
             _disposed = true;
+            if (_fastPlan != IntPtr.Zero)
+            {
+                _fastPlanFree?.Invoke(_fastPlan);
+                _fastPlan = IntPtr.Zero;
+            }
             if (_cif != IntPtr.Zero) { Marshal.FreeHGlobal(_cif); _cif = IntPtr.Zero; }
             if (_argTypesArray != IntPtr.Zero) { Marshal.FreeHGlobal(_argTypesArray); _argTypesArray = IntPtr.Zero; }
         }

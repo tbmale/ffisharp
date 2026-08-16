@@ -164,6 +164,16 @@ namespace FfiSharp.Backend
                 var plan = new FfiCallPlan(cif, argTypesArray, returnType, argumentTypes);
                 cif = IntPtr.Zero;
                 argTypesArray = IntPtr.Zero;
+
+                // Optional reusable call-plan fast path (libffi 3.7.0+). Falls back
+                // to ffi_call transparently when the API is unavailable.
+                if (_ffi.HasCallPlanApi)
+                {
+                    IntPtr fast = _ffi.CreateCallPlan(plan.Cif);
+                    if (fast != IntPtr.Zero)
+                        plan.AttachFastPlan(fast, _ffi.FreeCallPlan);
+                }
+
                 return plan;
             }
             finally
@@ -198,7 +208,10 @@ namespace FfiSharp.Backend
                 IntPtr rvalue = Marshal.AllocHGlobal(returnSize);
                 try
                 {
-                    _ffi.CallFunction(plan.Cif, function, rvalue, avalues);
+                    if (plan.HasFastPlan)
+                        _ffi.InvokeCallPlan(plan.FastPlan, function, rvalue, avalues);
+                    else
+                        _ffi.CallFunction(plan.Cif, function, rvalue, avalues);
                     return _marshaller.MarshalReturn(plan.ReturnType, rvalue);
                 }
                 finally

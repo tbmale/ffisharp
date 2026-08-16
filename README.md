@@ -198,10 +198,28 @@ using (var backend = new LibFfiBackend("/opt/custom/libffi.so.8"))
 ```
 
 > **Note:** when you hand `LibFfiBackend` (or `FfiLoadOptions.LibFfiPath`) a path,
-> FfiSharp loads and therefore owns/disposes that libffi handle. There is no
-> "borrow an already-loaded handle" mode — if you need that, wrap your existing
-> native handle in your own `INativeLibrary` implementation and pass it to
-> `LibFfiBackend`'s constructor overload.
+> FfiSharp loads and therefore owns/disposes that libffi handle. To *borrow* an
+> already-loaded handle instead, wrap it in your own `INativeLibrary`
+> implementation and pass that to the `LibFfiBackend(INativeLibrary, ...)`
+> constructor overload — the caller then retains ownership and disposes the handle.
+
+## Performance & caching
+
+FfiSharp never reparses the header, re-resolves symbols, or rebuilds call
+descriptions on the hot path. Everything is cached and shared across threads:
+
+- **Header** — parsed once per `Ffi.Load` / `Ffi.LoadLibrary`.
+- **Symbols** — resolved once and cached per `NativeFunctionBinding`.
+- **`FfiType` / `ffi_type`** — canonical, cached per type (incl. aggregate struct
+  types and built-in typedefs).
+- **Call plans** — each binding builds its `ffi_cif` once and reuses it.
+- **Callbacks** — closures are allocated once and retained by the callback
+  registry until disposed.
+
+On libffi 3.7.0+ the backend additionally builds a **reusable call plan**
+(`ffi_call_plan_alloc` / `ffi_call_plan_invoke` / `ffi_call_plan_free`) per
+signature, avoiding libffi's per-call argument classification. When that API is
+absent (older libffi), it transparently falls back to `ffi_call`.
 
 ## Supported platforms
 
@@ -242,7 +260,7 @@ system library. Version and MIT license are documented in
 ```bash
 # Linux
 dotnet build
-dotnet test tests/FfiSharp.Tests          # 77 xunit tests
+dotnet test tests/FfiSharp.Tests          # 92 xunit tests
 bash tests/native/build.sh                 # native test lib (example.so)
 
 # .NET Framework smoke (Linux, via mono)
