@@ -212,7 +212,8 @@ descriptions on the hot path. Everything is cached and shared across threads:
 - **Symbols** — resolved once and cached per `NativeFunctionBinding`.
 - **`FfiType` / `ffi_type`** — canonical, cached per type (incl. aggregate struct
   types and built-in typedefs).
-- **Call plans** — each binding builds its `ffi_cif` once and reuses it.
+- **Call plans** — each binding builds its `ffi_cif` once and reuses it; the
+  signature's primitive-only classification is computed once and never mutated.
 - **Callbacks** — closures are allocated once and retained by the callback
   registry until disposed.
 
@@ -220,6 +221,30 @@ On libffi 3.7.0+ the backend additionally builds a **reusable call plan**
 (`ffi_call_plan_alloc` / `ffi_call_plan_invoke` / `ffi_call_plan_free`) per
 signature, avoiding libffi's per-call argument classification. When that API is
 absent (older libffi), it transparently falls back to `ffi_call`.
+
+The invocation hot path is also allocation-light:
+
+- **InvocationFrame** — a thread-local, nesting-aware reusable scratch buffer
+  holds the `avalues` array, aligned primitive storage, return buffer, and
+  cleanup records. Nested/reentrant calls (a callback that re-enters FfiSharp)
+  each get their own frame from a per-thread stack, so an outer frame stays valid.
+- **No per-argument `MarshalledValue`/`Action`** — a compact cleanup discriminator
+  (`CleanupKind`) replaces per-argument closures.
+- **Primitive fast path** — primitive-only signatures write each argument directly
+  into frame storage with no per-argument unmanaged allocation and no cleanup
+  record.
+- **Callback-exception fast path** — a `volatile` flag gates the (rare) pending-
+  exception drain, so ordinary native calls do not lock the callback registry.
+
+A minimal benchmark harness lives in `benchmarks/FfiSharp.Benchmarks` (no
+runtime dependency). Measured on Linux x64 (Release), the primitive
+`int add(int,int)` path dropped from ~353 B/op to ~73 B/op (and ~538 ns to
+~302 ns) versus the previous implementation, isolating framework overhead from
+actual native work. Run it with:
+
+```bash
+dotnet run --project benchmarks/FfiSharp.Benchmarks -c Release
+```
 
 ## Supported platforms
 
