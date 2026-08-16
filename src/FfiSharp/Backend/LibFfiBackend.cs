@@ -93,7 +93,7 @@ namespace FfiSharp.Backend
         /// Creates a native callable function pointer (a libffi closure) that
         /// dispatches to the given managed delegate using <paramref name="signature"/>.
         /// </summary>
-        internal FfiCallback CreateCallback(FfiFunctionType signature, Delegate callback, CallbackExceptionPolicy policy)
+        internal FfiCallback CreateCallback(FfiFunctionType signature, Delegate callback, CallbackExceptionPolicy policy, CallbackPendingFlag pendingFlag = null)
         {
             if (signature == null) throw new ArgumentNullException(nameof(signature));
             if (callback == null) throw new ArgumentNullException(nameof(callback));
@@ -102,7 +102,7 @@ namespace FfiSharp.Backend
 
             try
             {
-                var cb = new FfiCallback(this, signature, callback, policy, _marshaller);
+                var cb = new FfiCallback(this, signature, callback, policy, _marshaller, pendingFlag);
                 try
                 {
                     FfiCallPlan plan = CreateCallPlan(signature.CallingConvention, signature.ReturnType, signature.ParameterTypes);
@@ -210,46 +210,35 @@ namespace FfiSharp.Backend
             if (!_lifetime.TryEnter())
                 throw new ObjectDisposedException(nameof(LibFfiBackend));
 
+            // Reusable, thread-local scratch storage. Nested/reentrant calls each
+            // acquire their own frame, so this frame stays valid for the whole call
+            // even if a callback re-enters FfiSharp on the same thread.
+            InvocationFrame frame = InvocationFrames.Acquire();
             try
             {
                 int n = plan.ArgumentTypes.Count;
                 if (arguments.Length != n)
                     throw new ArgumentException($"Expected {n} arguments but got {arguments.Length}.");
 
-                MarshalledValue[] marshalled = new MarshalledValue[n];
-                IntPtr avalues = Marshal.AllocHGlobal(CheckedArithmetic.Multiply(Math.Max(n, 1), IntPtr.Size));
-                try
-                {
-                    for (int i = 0; i < n; i++)
-                    {
-                        marshalled[i] = _marshaller.MarshalArgument(plan.ArgumentTypes[i], arguments[i]);
-                        Marshal.WriteIntPtr(avalues, i * IntPtr.Size, marshalled[i].Pointer);
-                    }
+                frame.EnsureCapacity(n, plan.ReturnType.Size);
 
-                    int returnSize = Math.Max(plan.ReturnType.Size, IntPtr.Size);
-                    IntPtr rvalue = Marshal.AllocHGlobal(returnSize);
-                    try
-                    {
-                        if (plan.HasFastPlan)
-                            _ffi.InvokeCallPlan(plan.FastPlan, function, rvalue, avalues);
-                        else
-                            _ffi.CallFunction(plan.Cif, function, rvalue, avalues);
-                        return _marshaller.MarshalReturn(plan.ReturnType, rvalue);
-                    }
-                    finally
-                    {
-                        Marshal.FreeHGlobal(rvalue);
-                    }
-                }
-                finally
-                {
-                    for (int i = 0; i < n; i++)
-                        marshalled[i]?.Release();
-                    Marshal.FreeHGlobal(avalues);
-                }
+                if (plan.IsPrimitiveOnly)
+                    _marshaller.MarshalPrimitiveArguments(frame, plan.ArgumentTypes, arguments);
+                else
+                    _marshaller.MarshalArguments(frame, plan.ArgumentTypes, arguments);
+
+                if (plan.HasFastPlan)
+                    _ffi.InvokeCallPlan(plan.FastPlan, function, frame.ReturnBuffer, frame.Avalues);
+                else
+                    _ffi.CallFunction(plan.Cif, function, frame.ReturnBuffer, frame.Avalues);
+
+                return _marshaller.MarshalReturn(plan.ReturnType, frame.ReturnBuffer);
             }
             finally
             {
+                // Copy-back + free happen here, before the frame is released for reuse.
+                _marshaller.Cleanup(frame);
+                InvocationFrames.Release(frame);
                 _lifetime.Exit();
             }
         }

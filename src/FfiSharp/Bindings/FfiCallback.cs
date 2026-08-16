@@ -31,6 +31,7 @@ namespace FfiSharp.Bindings
         private readonly Delegate _delegate;
         private readonly CallbackExceptionPolicy _policy;
         private readonly FfiMarshaller _marshaller;
+        private readonly CallbackPendingFlag _pendingFlag;
         private readonly GCHandle _gch;
 
         private FfiCallPlan _plan;
@@ -42,13 +43,14 @@ namespace FfiSharp.Bindings
         private bool _disposed;
         private readonly object _sync = new object();
 
-        internal FfiCallback(LibFfiBackend backend, FfiFunctionType signature, Delegate callback, CallbackExceptionPolicy policy, FfiMarshaller marshaller)
+        internal FfiCallback(LibFfiBackend backend, FfiFunctionType signature, Delegate callback, CallbackExceptionPolicy policy, FfiMarshaller marshaller, CallbackPendingFlag pendingFlag)
         {
             _backend = backend;
             _signature = signature;
             _delegate = callback;
             _policy = policy;
             _marshaller = marshaller;
+            _pendingFlag = pendingFlag;
             _gch = GCHandle.Alloc(this);
         }
 
@@ -155,27 +157,46 @@ namespace FfiSharp.Bindings
         internal void CaptureException(Exception ex)
         {
             if (_policy == CallbackExceptionPolicy.Ignore) return;
+            bool rethrow = false;
             lock (_sync)
             {
                 _lastException = ex;
                 if (_policy == CallbackExceptionPolicy.RethrowOnManagedBoundary)
+                {
                     _pendingRethrow = true;
+                    rethrow = true;
+                }
             }
+            // Set the shared "might be pending" flag AFTER recording the per-callback
+            // state, so a drain that observes the flag is guaranteed to see the state.
+            if (rethrow)
+                _pendingFlag?.Set();
         }
 
-        /// <summary>Rethrows a stored callback exception (RethrowOnManagedBoundary policy).</summary>
-        internal void ThrowPendingIfAny()
+        /// <summary>
+        /// Atomically takes (and clears) a pending exception if one is recorded,
+        /// without throwing. Used by the drain loop so it can preserve the existing
+        /// "one pending exception per call" semantics while retrying on races.
+        /// </summary>
+        internal bool TryTakePending(out Exception exception)
         {
-            Exception toThrow = null;
             lock (_sync)
             {
                 if (_pendingRethrow)
                 {
                     _pendingRethrow = false;
-                    toThrow = _lastException;
+                    exception = _lastException;
+                    return true;
                 }
             }
-            if (toThrow != null)
+            exception = null;
+            return false;
+        }
+
+        /// <summary>Rethrows a stored callback exception (RethrowOnManagedBoundary policy).</summary>
+        internal void ThrowPendingIfAny()
+        {
+            if (TryTakePending(out Exception toThrow))
                 throw new FfiException("A callback threw an exception", toThrow);
         }
 

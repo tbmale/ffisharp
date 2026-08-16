@@ -129,8 +129,18 @@ namespace FfiSharp.Tests
             var marshaller = new FfiMarshaller(platform, StringEncoding.Utf8);
             FfiType voidPtr = new FfiPointerType(null, false, platform.PointerSize, platform.PointerSize);
 
-            // A struct argument value for a void* must throw, never become NULL.
-            Assert.Throws<FfiMarshallingException>(() => marshaller.MarshalArgument(voidPtr, new object()));
+            // A non-pointer object value for a void* must throw, never become NULL.
+            InvocationFrame frame = InvocationFrames.Acquire();
+            try
+            {
+                Assert.Throws<FfiMarshallingException>(() =>
+                    marshaller.MarshalArguments(frame, new[] { voidPtr }, new object[] { new object() }));
+            }
+            finally
+            {
+                marshaller.Cleanup(frame);
+                InvocationFrames.Release(frame);
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using FfiSharp.Abi;
@@ -6,24 +7,38 @@ using FfiSharp.Abi;
 namespace FfiSharp.Marshaling
 {
     /// <summary>
-    /// A marshalled native argument: the pointer libffi reads (<see cref="Pointer"/>,
-    /// i.e. what goes in the <c>avalue</c> array) plus a release action that frees
-    /// native storage — and, for struct-pointer arguments, copies mutated values back
-    /// into the managed <see cref="FfiStruct"/> before freeing.
+    /// How a marshalled argument's native data buffer must be cleaned up after
+    /// <c>ffi_call</c>. This discriminator replaces per-argument <c>Action</c>
+    /// closures, so the hot path allocates no managed object or delegate per
+    /// argument. The pointer <em>slot</em> lives in reusable frame storage and is
+    /// never freed; only the data buffer (<see cref="MarshalledArg.Native"/>) is.
     /// </summary>
-    internal sealed class MarshalledValue
+    internal enum CleanupKind : byte
     {
-        private readonly Action _release;
+        /// <summary>No native resource to free (primitive/raw pointer written into frame storage).</summary>
+        None = 0,
+        /// <summary>Free the single native buffer at <see cref="MarshalledArg.Native"/>.</summary>
+        Free = 1,
+        /// <summary>Copy <see cref="MarshalledArg.Native"/> back into the <see cref="MarshalledArg.Retain"/> byte[] then free it.</summary>
+        CopyBackBytesFree = 2,
+        /// <summary>Copy the struct at <see cref="MarshalledArg.Native"/> back into the <see cref="MarshalledArg.Retain"/> FfiStruct then free it.</summary>
+        CopyBackStructFree = 3,
+    }
 
-        public MarshalledValue(IntPtr pointer, Action release)
-        {
-            Pointer = pointer;
-            _release = release;
-        }
-
-        public IntPtr Pointer { get; }
-
-        public void Release() => _release?.Invoke();
+    /// <summary>
+    /// A compact, allocation-light record describing one marshalled argument's native
+    /// data buffer and how to clean it up. <see cref="Retain"/> keeps any managed
+    /// object needed for copy-back strongly reachable until cleanup completes.
+    /// Records live in a reusable <see cref="InvocationFrame"/> array — no per-call
+    /// heap allocation and no closure.
+    /// </summary>
+    internal struct MarshalledArg
+    {
+        /// <summary>The native data buffer to free (or <see cref="IntPtr.Zero"/>).</summary>
+        public IntPtr Native;
+        public CleanupKind Kind;
+        /// <summary>Managed object required for copy-back (byte[] or FfiStruct).</summary>
+        public object Retain;
     }
 
     /// <summary>
@@ -42,54 +57,119 @@ namespace FfiSharp.Marshaling
             _encoding = encoding;
         }
 
-        public MarshalledValue MarshalArgument(FfiType type, object value)
+        // ---------------------------------------------------------------- frame marshalling
+
+        /// <summary>
+        /// Marshals every argument into the reusable frame's storage, filling its
+        /// <c>avalues</c> array and recording cleanup records (only for arguments
+        /// that allocate their own native buffer). Allocation-light: primitives and
+        /// raw pointers write directly into the frame and record nothing.
+        /// </summary>
+        public void MarshalArguments(InvocationFrame frame, IReadOnlyList<FfiType> argumentTypes, object[] arguments)
+        {
+            for (int i = 0; i < arguments.Length; i++)
+                MarshalArgument(frame, i, argumentTypes[i], arguments[i]);
+        }
+
+        /// <summary>
+        /// Primitive-only fast path: writes each primitive directly into an aligned
+        /// frame slot and reads nothing else — no cleanup records, no type dispatch
+        /// beyond the primitive write switch. Falls back to <see cref="MarshalArgument"/>
+        /// for any non-primitive type.
+        /// </summary>
+        public void MarshalPrimitiveArguments(InvocationFrame frame, IReadOnlyList<FfiType> argumentTypes, object[] arguments)
+        {
+            for (int i = 0; i < arguments.Length; i++)
+            {
+                FfiType type = argumentTypes[i];
+                if (type is FfiPrimitiveType p)
+                {
+                    IntPtr slot = frame.ArgSlot(i);
+                    WritePrimitive(slot, p, arguments[i]);
+                    frame.SetAvalue(i, slot);
+                }
+                else
+                {
+                    MarshalArgument(frame, i, type, arguments[i]);
+                }
+            }
+        }
+
+        private void MarshalArgument(InvocationFrame frame, int index, FfiType type, object value)
         {
             if (type is FfiPrimitiveType p)
             {
-                int size = Math.Max(p.Size, 1);
-                IntPtr ptr = Marshal.AllocHGlobal(size);
-                try
-                {
-                    WritePrimitive(ptr, p, value);
-                    return new MarshalledValue(ptr, () => Marshal.FreeHGlobal(ptr));
-                }
-                catch
-                {
-                    // Value validation/write can fail; do not leak the buffer.
-                    Marshal.FreeHGlobal(ptr);
-                    throw;
-                }
+                IntPtr slot = frame.ArgSlot(index);
+                WritePrimitive(slot, p, value);
+                frame.SetAvalue(index, slot);
+                return; // no cleanup
             }
 
             if (type is FfiPointerType pointer)
-                return MarshalPointer(pointer, value);
+            {
+                MarshalPointer(frame, index, pointer, value);
+                return;
+            }
 
             if (type is FfiFunctionType)
             {
                 // A function pointer is passed as a pointer-sized value. The binding
                 // layer converts managed delegates to closure pointers before we get here.
-                IntPtr slot = Marshal.AllocHGlobal(IntPtr.Size);
+                IntPtr slot = frame.ArgSlot(index);
                 Marshal.WriteIntPtr(slot, ToIntPtr(value));
-                return new MarshalledValue(slot, () => Marshal.FreeHGlobal(slot));
+                frame.SetAvalue(index, slot);
+                return; // no cleanup
             }
 
             if (type is FfiStructType s)
             {
+                // Struct by value: avalue[i] points directly at the struct storage.
                 IntPtr ptr = Marshal.AllocHGlobal(s.Size);
                 try
                 {
                     Zero(ptr, s.Size);
                     WriteStruct(ptr, s, AsFfiStructOfType(s, value, s.Name));
-                    return new MarshalledValue(ptr, () => Marshal.FreeHGlobal(ptr));
                 }
                 catch
                 {
                     Marshal.FreeHGlobal(ptr);
                     throw;
                 }
+                frame.SetAvalue(index, ptr);
+                frame.RecordCleanup(new MarshalledArg { Native = ptr, Kind = CleanupKind.Free });
+                return;
             }
 
             throw new NotSupportedException("Cannot marshal argument of type " + type.GetType().Name + " yet.");
+        }
+
+        /// <summary>Executes all recorded cleanup records (copy-back before free) and resets the frame.</summary>
+        public void Cleanup(InvocationFrame frame)
+        {
+            for (int i = 0; i < frame.CleanupCount; i++)
+            {
+                MarshalledArg arg = frame.CleanupRecord(i);
+                switch (arg.Kind)
+                {
+                    case CleanupKind.Free:
+                        Marshal.FreeHGlobal(arg.Native);
+                        break;
+                    case CleanupKind.CopyBackBytesFree:
+                        {
+                            byte[] bytes = (byte[])arg.Retain;
+                            Marshal.Copy(arg.Native, bytes, 0, bytes.Length);
+                            Marshal.FreeHGlobal(arg.Native);
+                            break;
+                        }
+                    case CleanupKind.CopyBackStructFree:
+                        {
+                            ReadStructInto(arg.Native, ((FfiStruct)arg.Retain).Type, (FfiStruct)arg.Retain);
+                            Marshal.FreeHGlobal(arg.Native);
+                            break;
+                        }
+                }
+            }
+            frame.Reset();
         }
 
         public object MarshalReturn(FfiType type, IntPtr storage)
@@ -129,55 +209,70 @@ namespace FfiSharp.Marshaling
 
         // ---------------------------------------------------------------- pointers
 
-        private MarshalledValue MarshalPointer(FfiPointerType pointer, object value)
+        private void MarshalPointer(InvocationFrame frame, int index, FfiPointerType pointer, object value)
         {
-            // Raw pointer (or null): pass directly, no copy-back.
+            // Raw pointer (or null): write the pointer value into the frame slot.
             if (value == null || value is IntPtr || value is UIntPtr)
-                return Passthrough(ToIntPtr(value));
+            {
+                IntPtr slot = frame.ArgSlot(index);
+                Marshal.WriteIntPtr(slot, ToIntPtr(value));
+                frame.SetAvalue(index, slot);
+                return;
+            }
 
             // Struct pointer passed as a boxed FfiStruct: allocate struct storage,
-            // write it, and copy the (possibly mutated) result back on release.
+            // write it, and copy the (possibly mutated) result back on cleanup.
             if (pointer.Pointee is FfiStructType st && value is FfiStruct fs)
             {
                 IntPtr structBuf = Marshal.AllocHGlobal(st.Size);
-                IntPtr slot = Marshal.AllocHGlobal(IntPtr.Size);
                 try
                 {
                     Zero(structBuf, st.Size);
                     WriteStruct(structBuf, st, fs);
-                    Marshal.WriteIntPtr(slot, structBuf);
-                    return new MarshalledValue(slot, () =>
-                    {
-                        ReadStructInto(structBuf, st, fs);
-                        Marshal.FreeHGlobal(structBuf);
-                        Marshal.FreeHGlobal(slot);
-                    });
                 }
                 catch
                 {
                     Marshal.FreeHGlobal(structBuf);
-                    Marshal.FreeHGlobal(slot);
                     throw;
                 }
+                IntPtr slot = frame.ArgSlot(index);
+                Marshal.WriteIntPtr(slot, structBuf);
+                frame.SetAvalue(index, slot);
+                frame.RecordCleanup(new MarshalledArg { Native = structBuf, Kind = CleanupKind.CopyBackStructFree, Retain = fs });
+                return;
             }
 
             // String → narrow char* / wchar_t* (null-terminated).
             if (value is string s)
             {
+                IntPtr buf;
                 if (IsNarrowChar(pointer.Pointee))
-                    return MarshalNarrowString(s);
-                if (IsWChar(pointer.Pointee))
-                    return MarshalWideString(s);
-                throw new FfiMarshallingException(
-                    "Cannot pass a string to '" + pointer + "'; use an IntPtr for non-character pointers.");
+                    buf = EncodeNarrowBuffer(s);
+                else if (IsWChar(pointer.Pointee))
+                    buf = EncodeWideBuffer(s);
+                else
+                    throw new FfiMarshallingException(
+                        "Cannot pass a string to '" + pointer + "'; use an IntPtr for non-character pointers.");
+
+                IntPtr slot = frame.ArgSlot(index);
+                Marshal.WriteIntPtr(slot, buf);
+                frame.SetAvalue(index, slot);
+                frame.RecordCleanup(new MarshalledArg { Native = buf, Kind = CleanupKind.Free });
+                return;
             }
 
             // byte[] → opaque buffer (void* / unsigned char* / char*).
             if (value is byte[] bytes)
             {
-                if (IsBytePointer(pointer))
-                    return MarshalBytes(bytes);
-                throw new FfiMarshallingException("Cannot pass a byte[] to '" + pointer + "'.");
+                if (!IsBytePointer(pointer))
+                    throw new FfiMarshallingException("Cannot pass a byte[] to '" + pointer + "'.");
+
+                IntPtr buf = MarshalBytesBuffer(bytes);
+                IntPtr slot = frame.ArgSlot(index);
+                Marshal.WriteIntPtr(slot, buf);
+                frame.SetAvalue(index, slot);
+                frame.RecordCleanup(new MarshalledArg { Native = buf, Kind = CleanupKind.CopyBackBytesFree, Retain = bytes });
+                return;
             }
 
             throw new FfiMarshallingException(
@@ -200,63 +295,30 @@ namespace FfiSharp.Marshaling
             return addr;
         }
 
-        private static MarshalledValue Passthrough(IntPtr value)
-        {
-            IntPtr slot = Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.WriteIntPtr(slot, value);
-            return new MarshalledValue(slot, () => Marshal.FreeHGlobal(slot));
-        }
+        // ---------------------------------------------------------------- strings / buffers (allocate native data only; slot lives in the frame)
 
-        // ---------------------------------------------------------------- strings
-
-        private MarshalledValue MarshalNarrowString(string value)
+        private IntPtr EncodeNarrowBuffer(string value)
         {
             byte[] data = EncodeNarrow(value);
             IntPtr buf = Marshal.AllocHGlobal(data.Length);
             Marshal.Copy(data, 0, buf, data.Length);
-            return WrapPointer(buf);
+            return buf;
         }
 
-        private MarshalledValue MarshalWideString(string value)
+        private IntPtr EncodeWideBuffer(string value)
         {
             byte[] data = EncodeWide(value);
             IntPtr buf = Marshal.AllocHGlobal(data.Length);
             Marshal.Copy(data, 0, buf, data.Length);
-            return WrapPointer(buf);
+            return buf;
         }
 
-        private static MarshalledValue MarshalBytes(byte[] bytes)
+        private static IntPtr MarshalBytesBuffer(byte[] bytes)
         {
             int length = Math.Max(bytes.Length, 1);
             IntPtr buf = Marshal.AllocHGlobal(length);
             Marshal.Copy(bytes, 0, buf, bytes.Length);
-
-            IntPtr slot = Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.WriteIntPtr(slot, buf);
-            return new MarshalledValue(slot, () =>
-            {
-                // Copy any native mutations back before freeing: a mutable
-                // byte[]/unsigned char*/char* is a caller-owned buffer.
-                Marshal.Copy(buf, bytes, 0, bytes.Length);
-                Marshal.FreeHGlobal(buf);
-                Marshal.FreeHGlobal(slot);
-            });
-        }
-
-        /// <summary>
-        /// Wraps a data pointer in a pointer-sized slot: libffi reads
-        /// <c>avalue[i]</c> as a <c>void**</c>, so the slot must contain the data
-        /// address. The release action frees both the data buffer and the slot.
-        /// </summary>
-        private static MarshalledValue WrapPointer(IntPtr dataPtr)
-        {
-            IntPtr slot = Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.WriteIntPtr(slot, dataPtr);
-            return new MarshalledValue(slot, () =>
-            {
-                Marshal.FreeHGlobal(dataPtr);
-                Marshal.FreeHGlobal(slot);
-            });
+            return buf;
         }
 
         private byte[] EncodeNarrow(string s)
@@ -527,13 +589,6 @@ namespace FfiSharp.Marshaling
             if (type is FfiPointerType) return Marshal.ReadIntPtr(src);
             if (type is FfiStructType s) return ReadStruct(src, s);
             throw new NotSupportedException("Cannot read field of type " + type.GetType().Name);
-        }
-
-        private static FfiStruct AsFfiStruct(object value, string context)
-        {
-            if (value is FfiStruct fs) return fs;
-            throw new FfiMarshallingException(
-                $"Expected an FfiStruct for '{context}' but got " + (value?.GetType().Name ?? "null") + ".");
         }
 
         /// <summary>

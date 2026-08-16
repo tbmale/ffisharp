@@ -24,6 +24,24 @@ namespace FfiSharp.Bindings
             _argTypesArray = argTypesArray;
             ReturnType = returnType;
             ArgumentTypes = argumentTypes;
+            IsPrimitiveOnly = Classify(returnType, argumentTypes);
+        }
+
+        /// <summary>
+        /// Whether this signature's return and every argument are primitive types,
+        /// enabling the allocation-free primitive fast path. Computed once and never
+        /// mutated, so the call plan remains immutable and shareable across threads.
+        /// </summary>
+        internal bool IsPrimitiveOnly { get; }
+
+        private static bool Classify(FfiType returnType, IReadOnlyList<FfiType> argumentTypes)
+        {
+            if (!(returnType is FfiPrimitiveType))
+                return false;
+            for (int i = 0; i < argumentTypes.Count; i++)
+                if (!(argumentTypes[i] is FfiPrimitiveType))
+                    return false;
+            return true;
         }
 
         internal IntPtr Cif => _cif;
