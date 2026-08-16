@@ -51,25 +51,38 @@ namespace FfiSharp.Bindings
             if (!_pendingFlag.IsSet)
                 return;
 
-            // Slow path: drain one pending exception ("one per call" semantics). The
-            // retry loop guarantees a concurrently-recorded exception is never lost:
-            // CaptureException sets the flag after recording the per-callback state,
-            // so if the flag is observed set, the state is visible; clearing the flag
-            // before scanning means any record during the scan re-sets it.
+            // Slow path: surface one pending exception per call (matching the
+            // historical per-call semantics), without stranding any others.
+            //
+            // Take ONLY the first pending exception, then re-Set() the shared flag so
+            // any remaining pending exception stays visible for a subsequent call.
+            // The flag is cleared only when a full scan found zero pending.
             while (_pendingFlag.IsSet)
             {
-                _pendingFlag.Clear();
-
                 FfiCallback[] snapshot;
                 lock (_sync) snapshot = _callbacks.ToArray();
 
+                Exception first = null;
                 foreach (FfiCallback cb in snapshot)
                 {
-                    if (cb.TryTakePending(out Exception ex))
-                        throw new FfiException("A callback threw an exception", ex);
+                    if (cb.TryTakePending(out first))
+                        break; // take exactly one
                 }
-                // No pending found this pass (stale flag or a concurrent drain won).
-                // Loop re-checks the flag; exit if still clear.
+
+                if (first == null)
+                {
+                    // Stale flag (or a concurrent drain won). Safe to clear.
+                    _pendingFlag.Clear();
+                    return;
+                }
+
+                // Re-Set() before throwing: any OTHER callback's exception remains
+                // visible on the next call. When this was the last one, the next call
+                // scans, finds zero, and clears — a harmless extra lock+scan.
+                _pendingFlag.Set();
+
+                // Surface exactly one exception per call.
+                throw new FfiException("A callback threw an exception", first);
             }
         }
 

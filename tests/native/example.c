@@ -159,6 +159,27 @@ void fire_callback(int value)
         g_callback(value);
 }
 
+static Callback g_callback2 = 0;
+
+void set_callback2(Callback callback)
+{
+    g_callback2 = callback;
+}
+
+void fire_callback2(int value)
+{
+    if (g_callback2 != 0)
+        g_callback2(value);
+}
+
+void fire_both(int value)
+{
+    if (g_callback != 0)
+        g_callback(value);
+    if (g_callback2 != 0)
+        g_callback2(value);
+}
+
 void sort2(int a, int b, Comparator cmp, int *result)
 {
     if (result == 0)

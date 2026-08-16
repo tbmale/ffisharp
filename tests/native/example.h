@@ -64,6 +64,13 @@ void invoke_callback(Callback callback, int value);
 void set_callback(Callback callback);
 void fire_callback(int value);
 
+/* A second, independent callback slot, to test multi-callback exception draining. */
+void set_callback2(Callback callback);
+void fire_callback2(int value);
+
+/* Fires both registered callbacks in one native call (both may throw). */
+void fire_both(int value);
+
 void sort2(int a, int b, Comparator cmp, int *result);
 
 void invoke_callback_ex(void (*callback)(int), int value);

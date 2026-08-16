@@ -75,5 +75,40 @@ namespace FfiSharp.Tests
             Assert.Throws<ObjectDisposedException>(() => lib.GetStructType("Point"));
             Assert.Throws<ObjectDisposedException>(() => lib.CreateStruct("Point"));
         }
+
+        [Fact]
+        public void TwoPendingCallbackExceptionsAreBothSurfaced()
+        {
+            // Regression: the shared pending flag must not strand a second callback's
+            // exception. A single native call fires both callbacks, each recording an
+            // exception; then two separate invocations must each surface one.
+            var options = new FfiLoadOptions { CallbackExceptionPolicy = CallbackExceptionPolicy.RethrowOnManagedBoundary };
+            using (FfiLibrary lib = Ffi.LoadLibrary(ExampleSo, ExampleH, options))
+            {
+                lib.RegisterCallback("set_callback", (Action<int>)(_ => throw new InvalidOperationException("first")));
+                lib.RegisterCallback("set_callback2", (Action<int>)(_ => throw new InvalidOperationException("second")));
+
+                NativeFunction fireBoth = lib.GetFunction("fire_both");
+                NativeFunction fire1 = lib.GetFunction("fire_callback");
+
+                // Fire both callbacks in a single native call; both exceptions are
+                // recorded, but only one shared flag exists.
+                fireBoth.Invoke(1);
+
+                var seen = new System.Collections.Generic.HashSet<string>();
+                for (int i = 0; i < 4; i++)
+                {
+                    try { fire1.Invoke(1); }
+                    catch (FfiException ex)
+                    {
+                        var inner = ex.InnerException as InvalidOperationException;
+                        if (inner != null) seen.Add(inner.Message);
+                    }
+                }
+
+                Assert.Contains("first", seen);
+                Assert.Contains("second", seen);
+            }
+        }
     }
 }
