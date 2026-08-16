@@ -29,8 +29,12 @@ namespace FfiSharp
         {
             if (_disposed) return;
             _disposed = true;
-            _callback.Dispose();
-            _registry.Remove(_callback);
+
+            // If the callback is being disposed from within itself, the closure is
+            // deferred (kept registered) so a later non-reentrant dispose can release
+            // it; otherwise remove it from the registry immediately.
+            if (_callback.DisposeNow())
+                _registry.Remove(_callback);
         }
     }
 }

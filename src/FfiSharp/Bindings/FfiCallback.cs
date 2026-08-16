@@ -114,6 +114,7 @@ namespace FfiSharp.Bindings
             {
                 if (_closing) return false;
                 _activeCallbacks++;
+                CallbackContext.Enter();
                 return true;
             }
         }
@@ -123,6 +124,7 @@ namespace FfiSharp.Bindings
             lock (_sync)
             {
                 _activeCallbacks--;
+                CallbackContext.Exit();
                 if (_activeCallbacks == 0)
                     Monitor.PulseAll(_sync);
             }
@@ -177,18 +179,46 @@ namespace FfiSharp.Bindings
                 throw new FfiException("A callback threw an exception", toThrow);
         }
 
-        public void Dispose()
+        public void Dispose() => DisposeNow();
+
+        /// <summary>
+        /// Releases the closure's native resources. Returns <c>true</c> if they were
+        /// released immediately; returns <c>false</c> (deferring) if called
+        /// reentrantly from within the callback itself, because the libffi trampoline
+        /// cannot be freed while it is executing. A later non-reentrant
+        /// <see cref="Dispose"/> completes the release.
+        /// </summary>
+        internal bool DisposeNow()
         {
+            bool freeNow;
             lock (_sync)
             {
-                if (_disposed) return;
-                _disposed = true;
+                if (_disposed) return true;
                 _closing = true;
-                // Wait for any callback already entered into the thunk to finish.
-                while (_activeCallbacks > 0)
-                    Monitor.Wait(_sync);
+
+                if (CallbackContext.Depth > 0)
+                {
+                    // Reentrant: this thread is inside the callback. Mark closing so
+                    // new callback entries are rejected, but defer the free.
+                    freeNow = false;
+                }
+                else
+                {
+                    _disposed = true;
+                    // Wait for any callback already entered into the thunk to finish.
+                    while (_activeCallbacks > 0)
+                        Monitor.Wait(_sync);
+                    freeNow = true;
+                }
             }
 
+            if (freeNow)
+                FreeResources();
+            return freeNow;
+        }
+
+        private void FreeResources()
+        {
             // Only after all active callbacks have drained do we release native
             // resources. NOTE: the native caller must have already stopped invoking
             // this callback; a call arriving after Dispose violates the ownership

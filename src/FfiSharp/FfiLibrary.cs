@@ -25,6 +25,7 @@ namespace FfiSharp
             new Dictionary<string, NativeFunctionBinding>(StringComparer.Ordinal);
         private readonly object _sync = new object();
         private bool _disposed;
+        private bool _resourcesReleased;
 
         private FfiLibrary(
             INativeLibrary nativeLib,
@@ -141,6 +142,12 @@ namespace FfiSharp
         {
             lock (_sync)
             {
+                // Re-check disposal under the lock: closes the TOCTOU window where
+                // ThrowIfDisposed() passed but Dispose() ran before this lock was
+                // acquired (which would unload the native library under us).
+                if (_disposed)
+                    throw new ObjectDisposedException(nameof(FfiLibrary));
+
                 if (_functions.TryGetValue(name, out NativeFunctionBinding binding))
                     return binding;
 
@@ -216,16 +223,28 @@ namespace FfiSharp
 
         public void Dispose()
         {
-            NativeFunctionBinding[] bindings;
+            NativeFunctionBinding[] bindings = null;
             lock (_sync)
             {
-                if (_disposed) return;
+                if (_resourcesReleased) return;
                 _disposed = true;
+
+                // Reentrancy guard: disposing from within one of this library's own
+                // callbacks (reached via ffi_call on this thread) would deadlock
+                // draining the in-flight binding and could unload the DLL while its
+                // code is still on the stack. Defer; a later non-reentrant Dispose()
+                // completes the release.
+                if (CallbackContext.Depth > 0)
+                    return;
 
                 bindings = new NativeFunctionBinding[_functions.Count];
                 _functions.Values.CopyTo(bindings, 0);
                 _functions.Clear();
+                _resourcesReleased = true;
             }
+
+            if (bindings == null)
+                return; // deferred (reentrant)
 
             // Dispose bindings first: each drains its own in-flight invocations (via
             // its operation lease), which also ensures the target library's function

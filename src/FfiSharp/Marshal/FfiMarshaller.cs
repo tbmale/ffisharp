@@ -227,9 +227,20 @@ namespace FfiSharp.Marshaling
 
         private static MarshalledValue MarshalBytes(byte[] bytes)
         {
-            IntPtr buf = Marshal.AllocHGlobal(bytes.Length);
+            int length = Math.Max(bytes.Length, 1);
+            IntPtr buf = Marshal.AllocHGlobal(length);
             Marshal.Copy(bytes, 0, buf, bytes.Length);
-            return WrapPointer(buf);
+
+            IntPtr slot = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(slot, buf);
+            return new MarshalledValue(slot, () =>
+            {
+                // Copy any native mutations back before freeing: a mutable
+                // byte[]/unsigned char*/char* is a caller-owned buffer.
+                Marshal.Copy(buf, bytes, 0, bytes.Length);
+                Marshal.FreeHGlobal(buf);
+                Marshal.FreeHGlobal(slot);
+            });
         }
 
         /// <summary>

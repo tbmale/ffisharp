@@ -14,6 +14,7 @@ namespace FfiSharp.Tests
     /// a binding/backend/library/callback is concurrently disposed. Disposal must
     /// reject new operations, drain active ones, and only then release resources.
     /// </summary>
+    [Collection("callback-global")]
     public class LifetimeConcurrencyTests
     {
         private static string ExampleSo => Path.Combine(AppContext.BaseDirectory, "example.so");

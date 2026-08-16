@@ -10,6 +10,7 @@ namespace FfiSharp.Tests
     /// Phase 5 — callbacks: function-pointer typedefs/parameters, libffi closures,
     /// callback lifetime, and exception handling.
     /// </summary>
+    [Collection("callback-global")]
     public class CallbackTests
     {
         private static string ExampleSo => Path.Combine(AppContext.BaseDirectory, "example.so");
