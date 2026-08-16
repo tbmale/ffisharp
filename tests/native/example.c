@@ -220,3 +220,8 @@ int wcslen_c(const wchar_t *s)
 {
     return s == 0 ? -1 : (int)wcslen(s);
 }
+
+int __stdcall add_stdcall(int a, int b)
+{
+    return a + b;
+}

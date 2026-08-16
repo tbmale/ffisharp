@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <PlatformTarget>x86</PlatformTarget>
+    <Prefer32Bit>true</Prefer32Bit>
+    <RootNamespace>FfiSharp.Smoke.NetFxX86</RootNamespace>
+    <AssemblyName>FfiSharp.Smoke.NetFxX86</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="Microsoft.CSharp" />
+    <ProjectReference Include="../../src/FfiSharp/FfiSharp.csproj" />
+    <None Include="../native/example-x86.dll" Link="example-x86.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../native/example-x86.dll')" />
+    <None Include="../native/example.h" Link="example.h" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../runtimes/win-x86/native/libffi-8.dll" Link="libffi-8.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../runtimes/win-x86/native/libffi-8.dll')" />
+  </ItemGroup>
+
+</Project>

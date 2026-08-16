@@ -77,4 +77,7 @@ int checksum(unsigned char *buf, int len);
 const wchar_t *get_wide_name(void);
 int wcslen_c(const wchar_t *s);
 
+/* Phase 7 — calling conventions (stdcall; distinct on 32-bit x86) */
+int __stdcall add_stdcall(int a, int b);
+
 #endif /* EXAMPLE_H */

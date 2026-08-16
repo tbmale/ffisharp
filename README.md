@@ -211,6 +211,7 @@ Validated end-to-end (native calls, structs, callbacks, strings):
 |---|---|---|
 | Linux x64 | system libffi / vendored `.so` | ✅ tested (mono + .NET 8+) |
 | Windows x64 | mingw-w64 cross-compiled `libffi-8.dll` | ✅ tested (.NET Framework 4.8 under Wine) |
+| Windows x86 | mingw-w64 (i686) `libffi-8.dll` | ✅ tested (.NET Framework 4.8 under Wine) |
 
 The `runtimes/<rid>/native/` convention and the loader are structured for
 `linux-arm64`, `osx-x64`, and `osx-arm64` — those need platform-specific libffi
@@ -226,13 +227,15 @@ libffi is a runtime native dependency and is **vendored** (not assumed installed
 ```
 runtimes/
   win-x64/native/libffi-8.dll
+  win-x86/native/libffi-8.dll
   linux-x64/native/libffi.so.8
 ```
 
 The loader prefers a vendored copy next to the assembly and falls back to the
 system library. Version and MIT license are documented in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Rebuild scripts:
-`scripts/build-libffi-win.sh`, `scripts/build-libffi-linux.sh`.
+`scripts/build-libffi-win.sh`, `scripts/build-libffi-win-x86.sh`,
+`scripts/build-libffi-linux.sh`.
 
 ## Building & testing
 
@@ -246,9 +249,12 @@ bash tests/native/build.sh                 # native test lib (example.so)
 mono tests/FfiSharp.Smoke.NetFx/bin/Debug/net472/FfiSharp.Smoke.NetFx.exe
 
 # Windows .NET Framework (cross-compiled, via wine)
-bash tests/native/build-win.sh             # example.dll
-bash scripts/build-libffi-win.sh           # libffi-8.dll
+bash tests/native/build-win.sh             # example.dll (x64)
+bash tests/native/build-win-x86.sh         # example-x86.dll (x86)
+bash scripts/build-libffi-win.sh           # libffi-8.dll (x64)
+bash scripts/build-libffi-win-x86.sh       # libffi-8.dll (x86)
 WINEPREFIX=~/.wine-ffi wine tests/FfiSharp.Smoke.NetFx/bin/Debug/net472/FfiSharp.Smoke.NetFx.exe
+WINEPREFIX=~/.wine-ffi wine tests/FfiSharp.Smoke.NetFxX86/bin/Debug/net472/FfiSharp.Smoke.NetFxX86.exe
 ```
 
 ## Project layout

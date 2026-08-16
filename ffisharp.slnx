@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FfiSharp.Smoke.NetFx/FfiSharp.Smoke.NetFx.csproj" />
+    <Project Path="tests/FfiSharp.Smoke.NetFxX86/FfiSharp.Smoke.NetFxX86.csproj" />
     <Project Path="tests/FfiSharp.Smoke/FfiSharp.Smoke.csproj" />
     <Project Path="tests/FfiSharp.Tests/FfiSharp.Tests.csproj" />
   </Folder>

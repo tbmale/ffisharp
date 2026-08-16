@@ -25,6 +25,10 @@
           Link="libffi.so.8"
           CopyToOutputDirectory="PreserveNewest"
           Condition="Exists('../../runtimes/linux-x64/native/libffi.so.8')" />
+    <None Include="../../runtimes/win-x86/native/libffi-8.dll"
+          Link="libffi-8.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('../../runtimes/win-x86/native/libffi-8.dll')" />
   </ItemGroup>
 
 </Project>

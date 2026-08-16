@@ -21,6 +21,13 @@ namespace FfiSharp.Backend
         // by target (FFI_EXTRA_CIF_FIELDS), so we never blit it as a managed struct.
         private const int CifBufferSize = 256;
 
+        // libffi ABI ids for 32-bit x86 (src/x86/ffitarget.h). These are the only
+        // targets where cdecl and stdcall are distinct conventions:
+        //   win32: FFI_STDCALL = 2, FFI_MS_CDECL = 5 (default = MS_CDECL)
+        //   unix:  FFI_STDCALL = 5, FFI_SYSV     = 1 (default = SYSV)
+        private const int FfiAbiX86Win32Stdcall = 2;
+        private const int FfiAbiX86UnixStdcall = 5;
+
         private readonly INativeLibrary _ffiLib;
         private readonly LibFfiNative _ffi;
         private readonly NativeTypeResolver _nativeResolver;
@@ -218,10 +225,30 @@ namespace FfiSharp.Backend
 
         private int ToNativeAbi(FfiCallingConvention cc)
         {
-            // On 64-bit targets and most platforms there is a single calling
-            // convention, so cdecl and stdcall are equivalent. Map to the platform
-            // default ABI for now; 32-bit x86 stdcall support lands in Phase 7.
-            return _ffi.DefaultAbi;
+            return ResolveNativeAbi(cc, Platform, _ffi.DefaultAbi);
+        }
+
+        /// <summary>
+        /// Maps a logical calling convention to a libffi ABI id. On 32-bit x86,
+        /// <c>cdecl</c> and <c>stdcall</c> are distinct ABIs; everywhere else
+        /// (x64, arm64) there is a single convention and both map to the default.
+        /// </summary>
+        internal static int ResolveNativeAbi(FfiCallingConvention cc, FfiPlatform platform, int defaultAbi)
+        {
+            if (platform.Architecture == FfiArchitecture.X86)
+            {
+                if (cc == FfiCallingConvention.Stdcall)
+                {
+                    // FFI_STDCALL differs between win32 (2) and Unix x86 (5).
+                    return platform.OS == FfiOS.Windows
+                        ? FfiAbiX86Win32Stdcall
+                        : FfiAbiX86UnixStdcall;
+                }
+                // cdecl == default ABI (FFI_MS_CDECL on win32, FFI_SYSV on Unix x86).
+                return defaultAbi;
+            }
+
+            return defaultAbi;
         }
 
         private static INativeLibrary LoadLibFfi(string path)

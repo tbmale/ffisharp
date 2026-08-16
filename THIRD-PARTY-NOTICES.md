@@ -10,6 +10,7 @@ and callbacks/closures).
 - **License:** MIT License
 - **Vendored binaries:**
   - `runtimes/win-x64/native/libffi-8.dll` (Windows x64, cross-compiled with mingw-w64)
+  - `runtimes/win-x86/native/libffi-8.dll` (Windows x86, cross-compiled with mingw-w64)
   - `runtimes/linux-x64/native/libffi.so.8` (Linux x64, SONAME `libffi.so.8`)
 
 ### License
@@ -42,8 +43,9 @@ in the upstream repository at
 ### Rebuilding the vendored binaries
 
 ```
-scripts/build-libffi-win.sh     # Windows x64 (mingw-w64 cross-compile)
-scripts/build-libffi-linux.sh   # Linux x64 (native build)
+scripts/build-libffi-win.sh       # Windows x64 (mingw-w64 cross-compile)
+scripts/build-libffi-win-x86.sh   # Windows x86 (mingw-w64 cross-compile)
+scripts/build-libffi-linux.sh     # Linux x64 (native build)
 ```
 
 These download the libffi 3.8.0 source, build it, and write the result into the

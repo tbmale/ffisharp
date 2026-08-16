@@ -153,9 +153,7 @@ namespace FfiSharp
                 for (int i = 0; i < fn.Parameters.Count; i++)
                     argumentTypes.Add(_resolver.Resolve(fn.Parameters[i].Type));
 
-                IntPtr address = _nativeLib.GetSymbol(name);
-                if (address == IntPtr.Zero)
-                    throw new MissingSymbolException(name);
+                IntPtr address = ResolveSymbol(name, fn, argumentTypes);
 
                 binding = new NativeFunctionBinding(
                     _backend, name, address, returnType, argumentTypes, fn.CallingConvention, CreateCallback,
@@ -163,6 +161,50 @@ namespace FfiSharp
                 _functions[name] = binding;
                 return binding;
             }
+        }
+
+        /// <summary>
+        /// Resolves a function's native symbol, handling 32-bit Windows stdcall name
+        /// decoration (<c>name@N</c> / <c>_name@N</c>, where N is the argument byte
+        /// count). Other conventions/ABIs export undecorated names.
+        /// </summary>
+        private IntPtr ResolveSymbol(string name, FunctionDeclaration fn, IReadOnlyList<FfiType> argumentTypes)
+        {
+            IntPtr address = _nativeLib.GetSymbol(name);
+            if (address != IntPtr.Zero)
+                return address;
+
+            if (fn.CallingConvention == FfiCallingConvention.Stdcall
+                && Platform.OS == FfiOS.Windows
+                && Platform.Architecture == FfiArchitecture.X86)
+            {
+                int argBytes = StdcallArgumentBytes(argumentTypes);
+                // mingw exports `name@N`; MSVC exports `_name@N`. Try both.
+                foreach (string decorated in new[] { name + "@" + argBytes, "_" + name + "@" + argBytes })
+                {
+                    address = _nativeLib.GetSymbol(decorated);
+                    if (address != IntPtr.Zero)
+                        return address;
+                }
+            }
+
+            throw new MissingSymbolException(name);
+        }
+
+        /// <summary>
+        /// Total argument bytes for stdcall name decoration: each argument's size
+        /// rounded up to a 4-byte stack slot. (Hidden struct-return pointers are not
+        /// included — those functions need an explicit undecorated export.)
+        /// </summary>
+        private static int StdcallArgumentBytes(IReadOnlyList<FfiType> argumentTypes)
+        {
+            int total = 0;
+            foreach (FfiType t in argumentTypes)
+            {
+                int size = Math.Max(t.Size, 1);
+                total += (size + 3) & ~3;
+            }
+            return total;
         }
 
         private FfiCallback CreateCallback(FfiFunctionType signature, Delegate callback)
