@@ -1,0 +1,196 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using FfiSharp.Abi;
+using FfiSharp.Backend;
+using FfiSharp.Bindings;
+using FfiSharp.Interop;
+using FfiSharp.Parsing;
+
+namespace FfiSharp
+{
+    /// <summary>
+    /// A loaded native library + parsed header. Owns the header model, the native
+    /// library handle, the libffi backend, the type resolver, and the function
+    /// binding cache. Disposing it releases all native resources.
+    /// </summary>
+    public sealed class FfiLibrary : IDisposable
+    {
+        private readonly INativeLibrary _nativeLib;
+        private readonly LibFfiBackend _backend;
+        private readonly HeaderModel _header;
+        private readonly CTypeResolver _resolver;
+        private readonly CallbackRegistry _callbacks;
+        private readonly Dictionary<string, NativeFunctionBinding> _functions =
+            new Dictionary<string, NativeFunctionBinding>(StringComparer.Ordinal);
+        private readonly object _sync = new object();
+        private bool _disposed;
+
+        private FfiLibrary(
+            INativeLibrary nativeLib,
+            LibFfiBackend backend,
+            HeaderModel header,
+            CTypeResolver resolver,
+            CallbackExceptionPolicy callbackPolicy)
+        {
+            _nativeLib = nativeLib;
+            _backend = backend;
+            _header = header;
+            _resolver = resolver;
+            _callbacks = new CallbackRegistry(backend, callbackPolicy);
+        }
+
+        /// <summary>The target ABI configuration.</summary>
+        public FfiPlatform Platform => _backend.Platform;
+
+        /// <summary>The parsed header model (functions + typedefs).</summary>
+        internal HeaderModel Header => _header;
+
+        public static FfiLibrary Load(string libraryPath, string headerPath, FfiLoadOptions options = null)
+        {
+            if (string.IsNullOrEmpty(libraryPath)) throw new ArgumentNullException(nameof(libraryPath));
+            if (string.IsNullOrEmpty(headerPath)) throw new ArgumentNullException(nameof(headerPath));
+            options = options ?? new FfiLoadOptions();
+
+            string source = File.ReadAllText(headerPath);
+            HeaderModel header = CParser.Parse(source);
+
+            INativeLibrary nativeLib = PlatformNativeLibrary.Load(libraryPath);
+            LibFfiBackend backend;
+            try
+            {
+                backend = new LibFfiBackend(options.LibFfiPath, options.Platform, options.StringEncoding);
+            }
+            catch
+            {
+                nativeLib.Dispose();
+                throw;
+            }
+
+            var resolver = new CTypeResolver(backend.Types, header, options.TypeAliases);
+            return new FfiLibrary(nativeLib, backend, header, resolver, options.CallbackExceptionPolicy);
+        }
+
+        /// <summary>Returns a bound native function by name (throws if unknown/missing).</summary>
+        public NativeFunction GetFunction(string name)
+        {
+            ThrowIfDisposed();
+            return new NativeFunction(GetBinding(name));
+        }
+
+        /// <summary>Returns the resolved struct type by typedef name or tag.</summary>
+        public FfiStructType GetStructType(string name)
+        {
+            ThrowIfDisposed();
+            return _resolver.ResolveStructByName(name);
+        }
+
+        /// <summary>Creates an empty boxed struct value for a struct type name.</summary>
+        public FfiStruct CreateStruct(string name)
+        {
+            ThrowIfDisposed();
+            return new FfiStruct(GetStructType(name));
+        }
+
+        /// <summary>
+        /// Registers a managed callback for a native function whose single parameter
+        /// is a function pointer, and invokes it with the new closure's pointer.
+        /// Returns a handle that owns the closure until disposed.
+        /// </summary>
+        public CallbackHandle RegisterCallback(string functionName, Delegate callback)
+        {
+            ThrowIfDisposed();
+            if (functionName == null) throw new ArgumentNullException(nameof(functionName));
+            if (callback == null) throw new ArgumentNullException(nameof(callback));
+
+            _callbacks.ThrowPendingExceptions();
+
+            FunctionDeclaration fn = _header.FindFunction(functionName);
+            if (fn == null)
+                throw new MissingSymbolException(functionName + " (not declared in header)");
+            if (fn.Parameters.Count != 1)
+                throw new FfiException("RegisterCallback requires a function with exactly one parameter");
+
+            FfiType paramType = _resolver.Resolve(fn.Parameters[0].Type);
+            if (!(paramType is FfiFunctionType ft))
+                throw new FfiException("RegisterCallback requires a function whose parameter is a function pointer");
+
+            FfiCallback cb = _callbacks.Create(ft, callback);
+            try
+            {
+                GetBinding(functionName).Invoke(new object[] { cb.FunctionPointer });
+            }
+            catch
+            {
+                cb.Dispose();
+                _callbacks.Remove(cb);
+                throw;
+            }
+
+            return new CallbackHandle(_callbacks, cb);
+        }
+
+        /// <summary>Invokes a function by name.</summary>
+        internal object Invoke(string name, object[] arguments)
+        {
+            ThrowIfDisposed();
+            return GetBinding(name).Invoke(arguments);
+        }
+
+        private NativeFunctionBinding GetBinding(string name)
+        {
+            lock (_sync)
+            {
+                if (_functions.TryGetValue(name, out NativeFunctionBinding binding))
+                    return binding;
+
+                FunctionDeclaration fn = _header.FindFunction(name);
+                if (fn == null)
+                    throw new MissingSymbolException(name + " (not declared in header)");
+
+                FfiType returnType = _resolver.Resolve(fn.ReturnType);
+                var argumentTypes = new List<FfiType>(fn.Parameters.Count);
+                for (int i = 0; i < fn.Parameters.Count; i++)
+                    argumentTypes.Add(_resolver.Resolve(fn.Parameters[i].Type));
+
+                IntPtr address = _nativeLib.GetSymbol(name);
+                if (address == IntPtr.Zero)
+                    throw new MissingSymbolException(name);
+
+                binding = new NativeFunctionBinding(
+                    _backend, name, address, returnType, argumentTypes, fn.CallingConvention, CreateCallback,
+                    _callbacks.ThrowPendingExceptions);
+                _functions[name] = binding;
+                return binding;
+            }
+        }
+
+        private FfiCallback CreateCallback(FfiFunctionType signature, Delegate callback)
+            => _callbacks.Create(signature, callback);
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                if (_disposed) return;
+                _disposed = true;
+
+                foreach (NativeFunctionBinding binding in _functions.Values)
+                    binding.Dispose();
+                _functions.Clear();
+
+                _callbacks.Dispose();
+                _backend.Dispose();
+                _nativeLib.Dispose();
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            lock (_sync)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(FfiLibrary));
+            }
+        }
+    }
+}

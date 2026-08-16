@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>FfiSharp.Tests</RootNamespace>
+    <AssemblyName>FfiSharp.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <ProjectReference Include="../../src/FfiSharp/FfiSharp.csproj" />
+    <None Include="../native/example.so" Link="example.so" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../native/example.h" Link="example.h" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../runtimes/linux-x64/native/libffi.so.8" Link="libffi.so.8" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../runtimes/linux-x64/native/libffi.so.8')" />
+  </ItemGroup>
+
+</Project>

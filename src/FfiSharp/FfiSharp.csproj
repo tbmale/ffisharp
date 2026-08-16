@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>FfiSharp</RootNamespace>
+    <AssemblyName>FfiSharp</AssemblyName>
+    <Description>A small, self-contained runtime C FFI library for C# built on libffi.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Vendored libffi runtime (Windows x64). Copied flat into the output directory
+      so the native library is found next to FfiSharp.dll at runtime by the
+      platform loader's candidate-name search (libffi.dll / libffi-8.dll / ...).
+      Rebuild it with: scripts/build-libffi-win.sh
+      See THIRD-PARTY-NOTICES.md for license and version.
+    -->
+    <None Include="../../runtimes/win-x64/native/libffi-8.dll"
+          Link="libffi-8.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('../../runtimes/win-x64/native/libffi-8.dll')" />
+    <None Include="../../runtimes/linux-x64/native/libffi.so.8"
+          Link="libffi.so.8"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('../../runtimes/linux-x64/native/libffi.so.8')" />
+  </ItemGroup>
+
+</Project>

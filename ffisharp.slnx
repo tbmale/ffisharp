@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FfiSharp/FfiSharp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FfiSharp.Smoke.NetFx/FfiSharp.Smoke.NetFx.csproj" />
+    <Project Path="tests/FfiSharp.Smoke/FfiSharp.Smoke.csproj" />
+    <Project Path="tests/FfiSharp.Tests/FfiSharp.Tests.csproj" />
+  </Folder>
+</Solution>

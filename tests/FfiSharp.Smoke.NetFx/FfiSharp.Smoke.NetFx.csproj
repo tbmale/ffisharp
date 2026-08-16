@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>FfiSharp.Smoke.NetFx</RootNamespace>
+    <AssemblyName>FfiSharp.Smoke.NetFx</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="Microsoft.CSharp" />
+    <ProjectReference Include="../../src/FfiSharp/FfiSharp.csproj" />
+    <None Include="../native/example.so" Link="example.so" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../native/example.dll" Link="example.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../native/example.dll')" />
+    <None Include="../native/example.h" Link="example.h" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../runtimes/win-x64/native/libffi-8.dll" Link="libffi-8.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../runtimes/win-x64/native/libffi-8.dll')" />
+    <None Include="../../runtimes/linux-x64/native/libffi.so.8" Link="libffi.so.8" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../runtimes/linux-x64/native/libffi.so.8')" />
+  </ItemGroup>
+
+</Project>
