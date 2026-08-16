@@ -30,6 +30,13 @@ namespace FfiSharp
         public FfiInvocationException(string message) : base(message) { }
     }
 
+    /// <summary>Thrown when a managed value cannot be converted to/from native memory.</summary>
+    public class FfiMarshallingException : FfiException
+    {
+        public FfiMarshallingException(string message) : base(message) { }
+        public FfiMarshallingException(string message, Exception inner) : base(message, inner) { }
+    }
+
     /// <summary>Thrown when a C header fails to lex or parse.</summary>
     public class FfiParseException : FfiException
     {

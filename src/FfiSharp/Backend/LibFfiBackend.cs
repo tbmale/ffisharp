@@ -33,6 +33,8 @@ namespace FfiSharp.Backend
         private readonly NativeTypeResolver _nativeResolver;
         private readonly FfiMarshaller _marshaller;
         private readonly bool _ownsLibFfi;
+        private readonly OperationLifetime _lifetime = new OperationLifetime();
+        private readonly object _disposeSync = new object();
         private bool _disposed;
 
         public int DefaultAbi => _ffi.DefaultAbi;
@@ -93,24 +95,32 @@ namespace FfiSharp.Backend
         /// </summary>
         internal FfiCallback CreateCallback(FfiFunctionType signature, Delegate callback, CallbackExceptionPolicy policy)
         {
-            ThrowIfDisposed();
             if (signature == null) throw new ArgumentNullException(nameof(signature));
             if (callback == null) throw new ArgumentNullException(nameof(callback));
+            if (!_lifetime.TryEnter())
+                throw new ObjectDisposedException(nameof(LibFfiBackend));
 
-            var cb = new FfiCallback(this, signature, callback, policy, _marshaller);
             try
             {
-                FfiCallPlan plan = CreateCallPlan(signature.CallingConvention, signature.ReturnType, signature.ParameterTypes);
-                IntPtr code;
-                IntPtr writable = _ffi.ClosureAlloc(_ffi.ClosureSize, out code);
-                cb.Attach(plan, writable, code);
-                _ffi.PrepareClosure(writable, plan.Cif, FfiCallback.ThunkPointer, cb.UserData, code);
-                return cb;
+                var cb = new FfiCallback(this, signature, callback, policy, _marshaller);
+                try
+                {
+                    FfiCallPlan plan = CreateCallPlan(signature.CallingConvention, signature.ReturnType, signature.ParameterTypes);
+                    IntPtr code;
+                    IntPtr writable = _ffi.ClosureAlloc(_ffi.ClosureSize, out code);
+                    cb.Attach(plan, writable, code);
+                    _ffi.PrepareClosure(writable, plan.Cif, FfiCallback.ThunkPointer, cb.UserData, code);
+                    return cb;
+                }
+                catch
+                {
+                    cb.Dispose();
+                    throw;
+                }
             }
-            catch
+            finally
             {
-                cb.Dispose();
-                throw;
+                _lifetime.Exit();
             }
         }
 
@@ -138,99 +148,124 @@ namespace FfiSharp.Backend
             FfiType returnType,
             IReadOnlyList<FfiType> argumentTypes)
         {
-            ThrowIfDisposed();
             if (returnType == null) throw new ArgumentNullException(nameof(returnType));
             if (argumentTypes == null) throw new ArgumentNullException(nameof(argumentTypes));
+            if (!_lifetime.TryEnter())
+                throw new ObjectDisposedException(nameof(LibFfiBackend));
 
-            int n = argumentTypes.Count;
-            IntPtr cif = Marshal.AllocHGlobal(CifBufferSize);
-            IntPtr argTypesArray = Marshal.AllocHGlobal(Math.Max(n, 1) * IntPtr.Size);
             try
             {
-                // ffi_cif has platform-specific trailing fields; zero them so the
-                // layout is deterministic before libffi writes its defined fields.
-                Marshal.Copy(new byte[CifBufferSize], 0, cif, CifBufferSize);
-
-                IntPtr rtypePtr = _nativeResolver.Resolve(returnType).Pointer;
-                for (int i = 0; i < n; i++)
+                int n = argumentTypes.Count;
+                int argArrayBytes = CheckedArithmetic.Multiply(Math.Max(n, 1), IntPtr.Size);
+                IntPtr cif = Marshal.AllocHGlobal(CifBufferSize);
+                IntPtr argTypesArray = Marshal.AllocHGlobal(argArrayBytes);
+                try
                 {
-                    IntPtr p = _nativeResolver.Resolve(argumentTypes[i]).Pointer;
-                    Marshal.WriteIntPtr(argTypesArray, i * IntPtr.Size, p);
+                    // ffi_cif has platform-specific trailing fields; zero them so the
+                    // layout is deterministic before libffi writes its defined fields.
+                    Marshal.Copy(new byte[CifBufferSize], 0, cif, CifBufferSize);
+
+                    IntPtr rtypePtr = _nativeResolver.Resolve(returnType).Pointer;
+                    for (int i = 0; i < n; i++)
+                    {
+                        IntPtr p = _nativeResolver.Resolve(argumentTypes[i]).Pointer;
+                        Marshal.WriteIntPtr(argTypesArray, i * IntPtr.Size, p);
+                    }
+
+                    int abi = ToNativeAbi(callingConvention);
+                    _ffi.PrepareCif(cif, abi, (uint)n, rtypePtr, argTypesArray);
+
+                    var plan = new FfiCallPlan(cif, argTypesArray, returnType, argumentTypes);
+                    cif = IntPtr.Zero;
+                    argTypesArray = IntPtr.Zero;
+
+                    // Optional reusable call-plan fast path (libffi 3.7.0+). Falls back
+                    // to ffi_call transparently when the API is unavailable.
+                    if (_ffi.HasCallPlanApi)
+                    {
+                        IntPtr fast = _ffi.CreateCallPlan(plan.Cif);
+                        if (fast != IntPtr.Zero)
+                            plan.AttachFastPlan(fast, _ffi.FreeCallPlan);
+                    }
+
+                    return plan;
                 }
-
-                int abi = ToNativeAbi(callingConvention);
-                _ffi.PrepareCif(cif, abi, (uint)n, rtypePtr, argTypesArray);
-
-                var plan = new FfiCallPlan(cif, argTypesArray, returnType, argumentTypes);
-                cif = IntPtr.Zero;
-                argTypesArray = IntPtr.Zero;
-
-                // Optional reusable call-plan fast path (libffi 3.7.0+). Falls back
-                // to ffi_call transparently when the API is unavailable.
-                if (_ffi.HasCallPlanApi)
+                finally
                 {
-                    IntPtr fast = _ffi.CreateCallPlan(plan.Cif);
-                    if (fast != IntPtr.Zero)
-                        plan.AttachFastPlan(fast, _ffi.FreeCallPlan);
+                    if (cif != IntPtr.Zero) Marshal.FreeHGlobal(cif);
+                    if (argTypesArray != IntPtr.Zero) Marshal.FreeHGlobal(argTypesArray);
                 }
-
-                return plan;
             }
             finally
             {
-                if (cif != IntPtr.Zero) Marshal.FreeHGlobal(cif);
-                if (argTypesArray != IntPtr.Zero) Marshal.FreeHGlobal(argTypesArray);
+                _lifetime.Exit();
             }
         }
 
         public object Invoke(FfiCallPlan plan, IntPtr function, object[] arguments)
         {
-            ThrowIfDisposed();
             if (plan == null) throw new ArgumentNullException(nameof(plan));
             if (function == IntPtr.Zero) throw new ArgumentNullException(nameof(function));
             if (arguments == null) throw new ArgumentNullException(nameof(arguments));
+            if (!_lifetime.TryEnter())
+                throw new ObjectDisposedException(nameof(LibFfiBackend));
 
-            int n = plan.ArgumentTypes.Count;
-            if (arguments.Length != n)
-                throw new ArgumentException($"Expected {n} arguments but got {arguments.Length}.");
-
-            MarshalledValue[] marshalled = new MarshalledValue[n];
-            IntPtr avalues = Marshal.AllocHGlobal(Math.Max(n, 1) * IntPtr.Size);
             try
             {
-                for (int i = 0; i < n; i++)
-                {
-                    marshalled[i] = _marshaller.MarshalArgument(plan.ArgumentTypes[i], arguments[i]);
-                    Marshal.WriteIntPtr(avalues, i * IntPtr.Size, marshalled[i].Pointer);
-                }
+                int n = plan.ArgumentTypes.Count;
+                if (arguments.Length != n)
+                    throw new ArgumentException($"Expected {n} arguments but got {arguments.Length}.");
 
-                int returnSize = Math.Max(plan.ReturnType.Size, IntPtr.Size);
-                IntPtr rvalue = Marshal.AllocHGlobal(returnSize);
+                MarshalledValue[] marshalled = new MarshalledValue[n];
+                IntPtr avalues = Marshal.AllocHGlobal(CheckedArithmetic.Multiply(Math.Max(n, 1), IntPtr.Size));
                 try
                 {
-                    if (plan.HasFastPlan)
-                        _ffi.InvokeCallPlan(plan.FastPlan, function, rvalue, avalues);
-                    else
-                        _ffi.CallFunction(plan.Cif, function, rvalue, avalues);
-                    return _marshaller.MarshalReturn(plan.ReturnType, rvalue);
+                    for (int i = 0; i < n; i++)
+                    {
+                        marshalled[i] = _marshaller.MarshalArgument(plan.ArgumentTypes[i], arguments[i]);
+                        Marshal.WriteIntPtr(avalues, i * IntPtr.Size, marshalled[i].Pointer);
+                    }
+
+                    int returnSize = Math.Max(plan.ReturnType.Size, IntPtr.Size);
+                    IntPtr rvalue = Marshal.AllocHGlobal(returnSize);
+                    try
+                    {
+                        if (plan.HasFastPlan)
+                            _ffi.InvokeCallPlan(plan.FastPlan, function, rvalue, avalues);
+                        else
+                            _ffi.CallFunction(plan.Cif, function, rvalue, avalues);
+                        return _marshaller.MarshalReturn(plan.ReturnType, rvalue);
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(rvalue);
+                    }
                 }
                 finally
                 {
-                    Marshal.FreeHGlobal(rvalue);
+                    for (int i = 0; i < n; i++)
+                        marshalled[i]?.Release();
+                    Marshal.FreeHGlobal(avalues);
                 }
             }
             finally
             {
-                for (int i = 0; i < n; i++)
-                    marshalled[i]?.Release();
-                Marshal.FreeHGlobal(avalues);
+                _lifetime.Exit();
             }
         }
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            // Reject new operations and wait for in-flight native invocations /
+            // plan creation to finish before unloading libffi.
+            _lifetime.Close();
+
+            lock (_disposeSync)
+            {
+                if (_disposed) return;
+                _disposed = true;
+            }
+
             _nativeResolver.Dispose();
             if (_ownsLibFfi)
                 _ffiLib.Dispose();

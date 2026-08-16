@@ -190,8 +190,10 @@ namespace FfiSharp.Interop
         {
             int n = elementRefs.Count;
 
-            // NULL-terminated elements array: n + 1 pointers.
-            IntPtr elements = Marshal.AllocHGlobal((n + 1) * IntPtr.Size);
+            // NULL-terminated elements array: n + 1 pointers (checked to avoid an
+            // undersized allocation on overflow).
+            int elementsBytes = CheckedArithmetic.Multiply(CheckedArithmetic.Add(n, 1), IntPtr.Size);
+            IntPtr elements = Marshal.AllocHGlobal(elementsBytes);
             try
             {
                 for (int i = 0; i < n; i++)

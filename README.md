@@ -260,7 +260,7 @@ system library. Version and MIT license are documented in
 ```bash
 # Linux
 dotnet build
-dotnet test tests/FfiSharp.Tests          # 92 xunit tests
+dotnet test tests/FfiSharp.Tests          # 120 xunit tests
 bash tests/native/build.sh                 # native test lib (example.so)
 
 # .NET Framework smoke (Linux, via mono)
@@ -300,6 +300,72 @@ scripts/                     libffi build scripts
 library **and** the header as fully trusted input. Malformed headers produce
 parser errors (never code execution), but a loaded library is indistinguishable
 from running that library's code directly. There is no sandboxing.
+
+## Thread safety & disposal
+
+FfiSharp is safe for concurrent use:
+
+- Independent invocations of the same function are concurrent — no global lock is
+  held around `ffi_call`.
+- Disposal (`FfiLibrary` / `NativeFunctionBinding` / `LibFfiBackend` /
+  `CallbackHandle`) **rejects new operations, waits for in-flight operations to
+  drain, and only then releases native resources**. A disposed object throws
+  `ObjectDisposedException` on further use rather than touching freed memory.
+- Caches (types, typedefs, symbols, call plans, callbacks) are thread-safe.
+- Callbacks may arrive on arbitrary native threads; a managed exception never
+  unwinds through native frames (see `CallbackExceptionPolicy`).
+
+One reentrancy caveat: do not call `Dispose()` from *within* an active callback or
+invocation on the same thread (e.g. a callback that disposes its own library);
+that would wait for itself. The native caller is responsible for unregistering or
+stopping callbacks before disposing them.
+
+## Design limitations & semantics
+
+These are **intentional** properties, not bugs. They are documented to distinguish
+"unsupported" from "not yet implemented" from "caller-owned lifetime" from
+"undefined behavior caused by violating the API contract".
+
+**C language subset**
+- Supported: functions, primitives, pointers, `const`/`volatile`, `typedef`,
+  structs (sequential layout, nested, fixed-size arrays), `cdecl`/`stdcall`
+  conventions, and function-pointer typedefs/parameters.
+- **Unsupported** (parse error, never approximated): unions, bitfields, packed /
+  alignment attributes, variadics (`...`), enums, global variables, and function
+  definitions with bodies. There is no preprocessor; use
+  `FfiLoadOptions.TypeAliases` for macros/typedefs the parser can't see.
+
+**ABI / platform assumptions**
+- libffi is the single source of truth for calling conventions, register/stack
+  placement, aggregate passing/returning, and trampolines. FfiSharp never
+  recomputes ABI rules.
+- `wchar_t` is a C ABI type whose size is target-dependent (2 bytes UTF-16 on
+  Windows, 4 bytes UTF-32 on Linux/macOS). `wchar_t*` is interpreted as *text*
+  only where the convenience marshalling explicitly does so.
+- Plain `char` signedness is implementation-defined; FfiSharp assumes the
+  conventional GCC/Clang default (signed everywhere except Linux/ARM64).
+- `stdcall` is a distinct ABI only on 32-bit x86 (Windows); on x64/arm64 it
+  collapses to the single default ABI. stdcall symbol decoration (`name@N`) is
+  resolved only on 32-bit Windows; hidden struct-return pointers are not accounted
+  for, so such functions need an undecorated export.
+- libffi is required at runtime (vendored; minimum version 3.5.0, fast-path
+  requires 3.7.0+). The opaque `ffi_cif` buffer is deliberately over-allocated to
+  256 bytes rather than querying `sizeof(ffi_cif)` via a helper.
+
+**Ownership & lifetime**
+- Raw returned pointers are **caller-owned** and are not freed by FfiSharp. Buffer
+  direction/copy semantics: string and `byte[]` arguments are copied *into*
+  native memory for the duration of the call; `FfiStruct` passed by pointer is
+  copied in and (for struct-pointer parameters) mutated values are copied *back*.
+- String arguments are null-terminated copies; a returned `const char*` is decoded
+  into a managed `string` (copy) — the native buffer remains owned by the callee.
+- **Callback lifetime is caller-owned**: the native library must not invoke a
+  callback after its `CallbackHandle` is disposed. Doing so is undefined native
+  behavior; FfiSharp drops late calls defensively where it can but cannot make an
+  already-freed trampoline safe to call.
+
+**Not yet implemented**
+- `linux-arm64`, `osx-x64`, `osx-arm64` libffi builds (need those platforms).
 
 ## License
 

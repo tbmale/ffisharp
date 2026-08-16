@@ -193,16 +193,20 @@ namespace FfiSharp
 
         /// <summary>
         /// Total argument bytes for stdcall name decoration: each argument's size
-        /// rounded up to a 4-byte stack slot. (Hidden struct-return pointers are not
-        /// included — those functions need an explicit undecorated export.)
+        /// rounded up to a 4-byte stack slot, using checked arithmetic. (Hidden
+        /// struct-return pointers are not included — such functions need an explicit
+        /// undecorated export; see README.)
         /// </summary>
-        private static int StdcallArgumentBytes(IReadOnlyList<FfiType> argumentTypes)
+        internal static int StdcallArgumentBytes(IReadOnlyList<FfiType> argumentTypes)
         {
             int total = 0;
             foreach (FfiType t in argumentTypes)
             {
                 int size = Math.Max(t.Size, 1);
-                total += (size + 3) & ~3;
+                // Round each argument up to a 4-byte stack slot, using checked
+                // arithmetic so an absurd argument size cannot wrap the decoration.
+                int slot = (size + 3) & ~3;
+                total = CheckedArithmetic.Add(total, slot);
             }
             return total;
         }
@@ -212,19 +216,27 @@ namespace FfiSharp
 
         public void Dispose()
         {
+            NativeFunctionBinding[] bindings;
             lock (_sync)
             {
                 if (_disposed) return;
                 _disposed = true;
 
-                foreach (NativeFunctionBinding binding in _functions.Values)
-                    binding.Dispose();
+                bindings = new NativeFunctionBinding[_functions.Count];
+                _functions.Values.CopyTo(bindings, 0);
                 _functions.Clear();
-
-                _callbacks.Dispose();
-                _backend.Dispose();
-                _nativeLib.Dispose();
             }
+
+            // Dispose bindings first: each drains its own in-flight invocations (via
+            // its operation lease), which also ensures the target library's function
+            // pointers are no longer being called through ffi_call. Then release
+            // callbacks, the libffi backend, and finally unload the target library.
+            foreach (NativeFunctionBinding binding in bindings)
+                binding.Dispose();
+
+            _callbacks.Dispose();
+            _backend.Dispose();
+            _nativeLib.Dispose();
         }
 
         private void ThrowIfDisposed()

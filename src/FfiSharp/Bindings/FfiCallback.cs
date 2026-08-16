@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using FfiSharp.Abi;
 using FfiSharp.Backend;
 using FfiSharp.Marshaling;
@@ -36,6 +37,8 @@ namespace FfiSharp.Bindings
         private IntPtr _writable;
         private Exception _lastException;
         private bool _pendingRethrow;
+        private int _activeCallbacks;
+        private bool _closing;
         private bool _disposed;
         private readonly object _sync = new object();
 
@@ -70,8 +73,27 @@ namespace FfiSharp.Bindings
 
         private static void ThunkImpl(IntPtr cif, IntPtr resp, IntPtr args, IntPtr userData)
         {
-            GCHandle gch = GCHandle.FromIntPtr(userData);
-            FfiCallback cb = (FfiCallback)gch.Target;
+            FfiCallback cb;
+            try
+            {
+                cb = GCHandle.FromIntPtr(userData).Target as FfiCallback;
+            }
+            catch
+            {
+                // GCHandle already freed (native caller violated the ownership rule:
+                // it must not call the callback after Dispose). Drop the call safely.
+                return;
+            }
+
+            if (cb == null)
+                return;
+
+            // Lease the callback so a concurrent Dispose() cannot free the closure
+            // or GCHandle underneath us mid-invocation. Once closing has begun the
+            // managed delegate is no longer invoked.
+            if (!cb.TryEnterCallback())
+                return;
+
             try
             {
                 cb.InvokeFromNative(resp, args);
@@ -79,6 +101,30 @@ namespace FfiSharp.Bindings
             catch (Exception ex)
             {
                 cb.CaptureException(Unwrap(ex));
+            }
+            finally
+            {
+                cb.ExitCallback();
+            }
+        }
+
+        private bool TryEnterCallback()
+        {
+            lock (_sync)
+            {
+                if (_closing) return false;
+                _activeCallbacks++;
+                return true;
+            }
+        }
+
+        private void ExitCallback()
+        {
+            lock (_sync)
+            {
+                _activeCallbacks--;
+                if (_activeCallbacks == 0)
+                    Monitor.PulseAll(_sync);
             }
         }
 
@@ -137,15 +183,23 @@ namespace FfiSharp.Bindings
             {
                 if (_disposed) return;
                 _disposed = true;
-
-                if (_writable != IntPtr.Zero)
-                {
-                    _backend.FreeClosure(_writable);
-                    _writable = IntPtr.Zero;
-                }
-                if (_plan != null) { _plan.Dispose(); _plan = null; }
-                if (_gch.IsAllocated) _gch.Free();
+                _closing = true;
+                // Wait for any callback already entered into the thunk to finish.
+                while (_activeCallbacks > 0)
+                    Monitor.Wait(_sync);
             }
+
+            // Only after all active callbacks have drained do we release native
+            // resources. NOTE: the native caller must have already stopped invoking
+            // this callback; a call arriving after Dispose violates the ownership
+            // contract and is dropped by the thunk (see ThunkImpl).
+            if (_writable != IntPtr.Zero)
+            {
+                _backend.FreeClosure(_writable);
+                _writable = IntPtr.Zero;
+            }
+            if (_plan != null) { _plan.Dispose(); _plan = null; }
+            if (_gch.IsAllocated) _gch.Free();
         }
     }
 }

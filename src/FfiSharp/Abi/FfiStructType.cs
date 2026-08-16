@@ -59,7 +59,7 @@ namespace FfiSharp.Abi
                 if (align < 1) align = 1;
                 offset = AlignUp(offset, align);
                 f.Offset = offset;
-                offset += f.Type.Size * f.ArrayLength;
+                offset = CheckedArithmetic.Add(offset, CheckedArithmetic.Multiply(f.Type.Size, f.ArrayLength));
                 if (align > maxAlign) maxAlign = align;
             }
 
@@ -82,7 +82,8 @@ namespace FfiSharp.Abi
             throw new KeyNotFoundException($"Struct '{Name}' has no field '{name}'");
         }
 
-        private static int AlignUp(int value, int alignment) => (value + alignment - 1) / alignment * alignment;
+        private static int AlignUp(int value, int alignment)
+            => CheckedArithmetic.Add(value, alignment - 1) / alignment * alignment;
 
         public override string ToString() => "struct " + (Name ?? "(anonymous)");
     }

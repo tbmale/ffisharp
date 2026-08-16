@@ -48,8 +48,17 @@ namespace FfiSharp.Marshaling
             {
                 int size = Math.Max(p.Size, 1);
                 IntPtr ptr = Marshal.AllocHGlobal(size);
-                WritePrimitive(ptr, p, value);
-                return new MarshalledValue(ptr, () => Marshal.FreeHGlobal(ptr));
+                try
+                {
+                    WritePrimitive(ptr, p, value);
+                    return new MarshalledValue(ptr, () => Marshal.FreeHGlobal(ptr));
+                }
+                catch
+                {
+                    // Value validation/write can fail; do not leak the buffer.
+                    Marshal.FreeHGlobal(ptr);
+                    throw;
+                }
             }
 
             if (type is FfiPointerType pointer)
@@ -70,7 +79,7 @@ namespace FfiSharp.Marshaling
                 try
                 {
                     Zero(ptr, s.Size);
-                    WriteStruct(ptr, s, AsFfiStruct(value, s.Name));
+                    WriteStruct(ptr, s, AsFfiStructOfType(s, value, s.Name));
                     return new MarshalledValue(ptr, () => Marshal.FreeHGlobal(ptr));
                 }
                 catch
@@ -114,7 +123,7 @@ namespace FfiSharp.Marshaling
             }
             if (type is FfiPointerType) { Marshal.WriteIntPtr(dest, ToIntPtr(value)); return; }
             if (type is FfiFunctionType) { Marshal.WriteIntPtr(dest, ToIntPtr(value)); return; }
-            if (type is FfiStructType s) { WriteStruct(dest, s, AsFfiStruct(value, s.Name)); return; }
+            if (type is FfiStructType s) { WriteStruct(dest, s, AsFfiStructOfType(s, value, s.Name)); return; }
             throw new NotSupportedException("Cannot write value of type " + type.GetType().Name);
         }
 
@@ -159,7 +168,7 @@ namespace FfiSharp.Marshaling
                     return MarshalNarrowString(s);
                 if (IsWChar(pointer.Pointee))
                     return MarshalWideString(s);
-                throw new ArgumentException(
+                throw new FfiMarshallingException(
                     "Cannot pass a string to '" + pointer + "'; use an IntPtr for non-character pointers.");
             }
 
@@ -168,10 +177,10 @@ namespace FfiSharp.Marshaling
             {
                 if (IsBytePointer(pointer))
                     return MarshalBytes(bytes);
-                throw new ArgumentException("Cannot pass a byte[] to '" + pointer + "'.");
+                throw new FfiMarshallingException("Cannot pass a byte[] to '" + pointer + "'.");
             }
 
-            throw new ArgumentException(
+            throw new FfiMarshallingException(
                 "A pointer argument must be an IntPtr, string, byte[], FfiStruct, or null. Got " + value.GetType().Name + ".");
         }
 
@@ -329,6 +338,13 @@ namespace FfiSharp.Marshaling
 
         // ---------------------------------------------------------------- type tests
 
+        private static bool IsNumericValue(object value)
+        {
+            return value is sbyte || value is byte || value is short || value is ushort
+                || value is int || value is uint || value is long || value is ulong
+                || value is float || value is double;
+        }
+
         private static bool IsNarrowChar(FfiType pointee)
             => pointee is FfiPrimitiveType p &&
                (p.Primitive == FfiPrimitive.Char || p.Primitive == FfiPrimitive.SChar);
@@ -353,13 +369,23 @@ namespace FfiSharp.Marshaling
             if (value == null) return IntPtr.Zero;
             if (value is IntPtr p) return p;
             if (value is UIntPtr up) return new IntPtr(unchecked((long)up.ToUInt64()));
-            return IntPtr.Zero;
+
+            // Unsupported managed values must NEVER silently become NULL: a native
+            // function would receive a null pointer and misbehave. Fail loudly.
+            throw new FfiMarshallingException(
+                "Expected a pointer representation (IntPtr, UIntPtr, or null) but got "
+                + value.GetType().Name + ".");
         }
 
         // ---------------------------------------------------------------- primitives
 
         private static void WritePrimitive(IntPtr dest, FfiPrimitiveType p, object value)
         {
+            if (value != null && !IsNumericValue(value))
+                throw new FfiMarshallingException(
+                    "Cannot marshal value of type " + value.GetType().Name
+                    + " as C " + p.Primitive + ". Expected a numeric value.");
+
             switch (p.Storage)
             {
                 case FfiPrimitive.Void:
@@ -451,7 +477,7 @@ namespace FfiSharp.Marshaling
         {
             if (type is FfiPrimitiveType p) { WritePrimitive(dest, p, value); return; }
             if (type is FfiPointerType) { Marshal.WriteIntPtr(dest, ToIntPtr(value)); return; }
-            if (type is FfiStructType s) { WriteStruct(dest, s, AsFfiStruct(value, fieldName)); return; }
+            if (type is FfiStructType s) { WriteStruct(dest, s, AsFfiStructOfType(s, value, fieldName)); return; }
             throw new NotSupportedException("Cannot write field of type " + type.GetType().Name);
         }
 
@@ -495,8 +521,26 @@ namespace FfiSharp.Marshaling
         private static FfiStruct AsFfiStruct(object value, string context)
         {
             if (value is FfiStruct fs) return fs;
-            throw new ArgumentException(
+            throw new FfiMarshallingException(
                 $"Expected an FfiStruct for '{context}' but got " + (value?.GetType().Name ?? "null") + ".");
+        }
+
+        /// <summary>
+        /// Requires <paramref name="value"/> to be an <see cref="FfiStruct"/> whose
+        /// type is exactly <paramref name="expected"/> (reference identity — struct
+        /// types are canonical/cached per declaration). Prevents silently
+        /// reinterpreting an unrelated struct according to the expected native layout.
+        /// </summary>
+        private static FfiStruct AsFfiStructOfType(FfiStructType expected, object value, string context)
+        {
+            if (!(value is FfiStruct fs))
+                throw new FfiMarshallingException(
+                    $"Expected an FfiStruct of type '{expected.Name}' for '{context}' but got "
+                    + (value?.GetType().Name ?? "null") + ".");
+            if (!ReferenceEquals(fs.Type, expected))
+                throw new FfiMarshallingException(
+                    $"Struct type mismatch for '{context}': expected '{expected.Name}' but got '{fs.Type.Name}'.");
+            return fs;
         }
 
         private static Type GetClrType(FfiType type)

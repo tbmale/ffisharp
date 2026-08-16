@@ -30,6 +30,11 @@ namespace FfiSharp
         public void SetField(string name, object value)
         {
             if (name == null) throw new ArgumentNullException(nameof(name));
+
+            // Validate against the authoritative FfiStructType immediately, so a
+            // typo fails here rather than at native marshalling time.
+            Type.GetField(name);
+
             _fields[name] = value;
         }
 
