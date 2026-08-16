@@ -25,6 +25,7 @@ namespace FfiSharp.Backend
         private readonly LibFfiNative _ffi;
         private readonly NativeTypeResolver _nativeResolver;
         private readonly FfiMarshaller _marshaller;
+        private readonly bool _ownsLibFfi;
         private bool _disposed;
 
         public int DefaultAbi => _ffi.DefaultAbi;
@@ -39,6 +40,25 @@ namespace FfiSharp.Backend
         public LibFfiBackend(string libFfiPath = null, FfiPlatform platform = null, StringEncoding stringEncoding = StringEncoding.Utf8)
         {
             _ffiLib = LoadLibFfi(libFfiPath);
+            _ownsLibFfi = true;
+            _ffi = new LibFfiNative(_ffiLib);
+            _nativeResolver = new NativeTypeResolver(_ffi);
+            Platform = platform ?? FfiPlatform.Detect();
+            Types = new FfiTypeSystem(Platform, ResolvePrimitive, ResolvePointer);
+            _marshaller = new FfiMarshaller(Platform, stringEncoding);
+        }
+
+        /// <summary>
+        /// Creates a backend over an already-loaded libffi instance. The caller
+        /// retains ownership of <paramref name="ffiLibrary"/> and is responsible for
+        /// disposing it; this backend will NOT dispose it. This is the escape hatch
+        /// for supplying a pre-loaded libffi handle (e.g. a native handle you loaded
+        /// yourself and wrapped in an <see cref="INativeLibrary"/>).
+        /// </summary>
+        public LibFfiBackend(INativeLibrary ffiLibrary, FfiPlatform platform = null, StringEncoding stringEncoding = StringEncoding.Utf8)
+        {
+            _ffiLib = ffiLibrary ?? throw new ArgumentNullException(nameof(ffiLibrary));
+            _ownsLibFfi = false;
             _ffi = new LibFfiNative(_ffiLib);
             _nativeResolver = new NativeTypeResolver(_ffi);
             Platform = platform ?? FfiPlatform.Detect();
@@ -192,7 +212,8 @@ namespace FfiSharp.Backend
             if (_disposed) return;
             _disposed = true;
             _nativeResolver.Dispose();
-            _ffiLib.Dispose();
+            if (_ownsLibFfi)
+                _ffiLib.Dispose();
         }
 
         private int ToNativeAbi(FfiCallingConvention cc)

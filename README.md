@@ -144,6 +144,65 @@ pointers and `void*` are treated as opaque and accept `IntPtr` or `byte[]`.
 | `StringEncoding` | `Utf8` | `Utf8` / `Ansi` / `Utf16` / `RawPointer`. |
 | `CallbackExceptionPolicy` | `Store` | `Ignore` / `Store` / `RethrowOnManagedBoundary`. |
 
+## Initialization & choosing a libffi
+
+By default FfiSharp loads libffi from a vendored copy next to the assembly, then
+falls back to the system library. To load libffi from an arbitrary path at
+initialization time, use `FfiLoadOptions.LibFfiPath`:
+
+```csharp
+using FfiSharp;
+
+var options = new FfiLoadOptions
+{
+    LibFfiPath = "/opt/custom/libffi.so.8"   // or "C:\\libs\\libffi-8.dll"
+};
+
+using (dynamic ffi = Ffi.Load("libexample.so", "example.h", options))
+{
+    int sum = ffi.add(10, 20);
+}
+```
+
+For full control, `LibFfiBackend` is a public entry point that lets you load a
+specific libffi and drive it directly (the same object `Ffi.Load` builds
+internally):
+
+```csharp
+using System;
+using FfiSharp.Abi;
+using FfiSharp.Backend;
+using FfiSharp.Bindings;
+using FfiSharp.Interop;
+
+// 1. Load libffi from an arbitrary path (does NOT rely on search paths).
+using (var backend = new LibFfiBackend("/opt/custom/libffi.so.8"))
+{
+    Console.WriteLine("libffi " + backend.LibFfiVersion);
+
+    // 2. Load the target library and resolve a function symbol.
+    using (var lib = PlatformNativeLibrary.Load("libexample.so"))
+    {
+        IntPtr add = lib.GetSymbolOrThrow("add");
+
+        // 3. Describe the signature and invoke through libffi.
+        FfiType intType = backend.CreatePrimitiveType(FfiPrimitive.Int);
+        using (FfiCallPlan plan = backend.CreateCallPlan(
+            FfiCallingConvention.Cdecl, intType, new[] { intType, intType }))
+        {
+            int result = Convert.ToInt32(backend.Invoke(plan, add, new object[] { 10, 20 }));
+            Console.WriteLine(result); // 30
+        }
+    }
+}
+```
+
+> **Note:** when you hand `LibFfiBackend` (or `FfiLoadOptions.LibFfiPath`) a path,
+> FfiSharp loads and therefore owns/disposes that libffi handle. There is no
+> "borrow an already-loaded handle" mode — if you need that, wrap your existing
+> native handle in your own `INativeLibrary` implementation and pass it to
+> `LibFfiBackend`'s constructor overload.
+
 ## Supported platforms
 
 Validated end-to-end (native calls, structs, callbacks, strings):
