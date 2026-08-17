@@ -220,10 +220,14 @@ namespace FfiSharp.Parsing
 
             SkipIgnorableSpecifiers();
 
-            // typedef <ret> (*Name)(params);  — a function-pointer typedef.
-            if (Cur.Kind == TokenKind.Symbol && Cur.Text == "(")
+            // typedef <ret> [*] (*Name)(params);  — a function-pointer typedef.
+            CTypeNode fpType = TryParseFunctionPointer(baseType, out string fpName);
+            if (fpType != null)
             {
-                ParseFunctionPointerTypedef(baseType, typedefs);
+                if (fpName == null)
+                    Error("Function-pointer typedef requires a name");
+                Expect(";");
+                AddTypedef(typedefs, fpName, fpType);
                 return;
             }
 
@@ -241,23 +245,57 @@ namespace FfiSharp.Parsing
             AddTypedef(typedefs, typedefName, ApplyPointers(baseType, pointers));
         }
 
-        private void ParseFunctionPointerTypedef(CTypeNode returnType, Dictionary<string, CTypeNode> typedefs)
+        /// <summary>
+        /// After a base type has been parsed, detects whether a function-pointer
+        /// declarator follows, consuming any <c>*</c> that are part of the function
+        /// pointer's <em>return</em> type (e.g. <c>const void* (*handler)(...)</c>).
+        /// Returns the function-pointer type node, or <c>null</c> when no function
+        /// pointer is present (restoring the token stream in that case).
+        /// </summary>
+        private CTypeNode TryParseFunctionPointer(CTypeNode baseType, out string declaratorName)
         {
+            declaratorName = null;
+
+            int savePos = _pos;
+            bool saveConst = _constPointee;
+
+            int returnPointers = 0;
+            while (Cur.Kind == TokenKind.Symbol && Cur.Text == "*")
+            {
+                Advance();
+                returnPointers++;
+                SkipIgnorableSpecifiers();
+            }
+
+            if (!(Cur.Kind == TokenKind.Symbol && Cur.Text == "("))
+            {
+                // Not a function pointer — it was a plain pointer declarator.
+                _pos = savePos;
+                _constPointee = saveConst;
+                return null;
+            }
+
+            // Resolve the return type (which consumes the pending const-pointee flag)
+            // BEFORE parsing the parameter list, because parameter parsing resets that
+            // flag. Otherwise `const void* (*handler)(...)` would lose its const.
+            CTypeNode fpReturnType = ApplyPointers(baseType, returnPointers);
+
             FfiCallingConvention cc = FfiCallingConvention.Cdecl;
             Expect("(");
             cc = ParseAttributesAndConvention(cc);
             if (!(Cur.Kind == TokenKind.Symbol && Cur.Text == "*"))
-                Error("Expected '*' in function-pointer typedef");
+                Error("Expected '*' in function-pointer declarator");
             Advance(); // '*'
             SkipIgnorableSpecifiers();
             cc = ParseAttributesAndConvention(cc);
-            string name = ExpectIdentifier();
+            if (Cur.Kind == TokenKind.Identifier)
+                declaratorName = ExpectIdentifier();
             cc = ParseAttributesAndConvention(cc);
             Expect(")");
             Expect("(");
             List<ParameterDeclaration> parameters = ParseParameterList(); // consumes ')'
-            Expect(";");
-            AddTypedef(typedefs, name, new CFunctionPointerTypeNode(returnType, parameters, cc));
+
+            return new CFunctionPointerTypeNode(fpReturnType, parameters, cc);
         }
 
         private List<StructFieldDeclaration> ParseStructBody()
@@ -405,26 +443,10 @@ namespace FfiSharp.Parsing
             CTypeNode baseType = ParseBaseType();
             SkipIgnorableSpecifiers();
 
-            // Function pointer parameter: ret (*name)(params)
-            if (Cur.Kind == TokenKind.Symbol && Cur.Text == "(")
-            {
-                FfiCallingConvention cc = FfiCallingConvention.Cdecl;
-                Expect("(");
-                cc = ParseAttributesAndConvention(cc);
-                if (!(Cur.Kind == TokenKind.Symbol && Cur.Text == "*"))
-                    Error("Expected '*' in function-pointer parameter");
-                Advance(); // '*'
-                SkipIgnorableSpecifiers();
-                cc = ParseAttributesAndConvention(cc);
-                string fnName = null;
-                if (Cur.Kind == TokenKind.Identifier)
-                    fnName = ExpectIdentifier();
-                cc = ParseAttributesAndConvention(cc);
-                Expect(")");
-                Expect("(");
-                List<ParameterDeclaration> fnParams = ParseParameterList(); // consumes ')'
-                return new ParameterDeclaration(fnName, new CFunctionPointerTypeNode(baseType, fnParams, cc));
-            }
+            // Function pointer parameter: [ret *] (*name)(params)
+            CTypeNode fpType = TryParseFunctionPointer(baseType, out string fnName);
+            if (fpType != null)
+                return new ParameterDeclaration(fnName, fpType);
 
             int pointers = 0;
             while (Cur.Kind == TokenKind.Symbol && Cur.Text == "*")

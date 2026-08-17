@@ -44,6 +44,44 @@ namespace FfiSharp.Tests
             Assert.Equal(2, f.Parameters.Count);
         }
 
+        [Fact]
+        public void ParsesPointerReturningFunctionPointerTypedef()
+        {
+            var model = CParser.Parse("typedef void* (*handler)(int value);");
+            var fp = (CFunctionPointerTypeNode)model.Typedefs["handler"];
+            Assert.IsType<CPointerTypeNode>(fp.ReturnType); // void*
+            Assert.Single(fp.Parameters);
+        }
+
+        [Fact]
+        public void ParsesConstPointerReturningFunctionPointerTypedef()
+        {
+            var model = CParser.Parse("typedef const void* (*handler)(int value);");
+            var fp = (CFunctionPointerTypeNode)model.Typedefs["handler"];
+            var ret = Assert.IsType<CPointerTypeNode>(fp.ReturnType);
+            Assert.True(ret.PointeeIsConst); // const void*
+            Assert.Single(fp.Parameters);
+        }
+
+        [Fact]
+        public void ParsesPointerReturningFunctionPointerParameter()
+        {
+            var model = CParser.Parse("void f(void* (*cb)(int), int n);");
+            var f = model.Functions[0];
+            var fp = Assert.IsType<CFunctionPointerTypeNode>(f.Parameters[0].Type);
+            Assert.IsType<CPointerTypeNode>(fp.ReturnType);
+        }
+
+        [Fact]
+        public void ParsesConstPointerReturningFunctionPointerParameter()
+        {
+            var model = CParser.Parse("void f(const void* (*cb)(int));");
+            var f = model.Functions[0];
+            var fp = Assert.IsType<CFunctionPointerTypeNode>(f.Parameters[0].Type);
+            var ret = Assert.IsType<CPointerTypeNode>(fp.ReturnType);
+            Assert.True(ret.PointeeIsConst);
+        }
+
         // ---------------------------------------------------------------- invocation
 
         [Fact]
